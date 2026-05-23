@@ -51,6 +51,12 @@ interface UpdateInfo {
   release_notes: string | null;
 }
 
+interface PhraseTemplate {
+  situation: string;
+  template: string;
+  occurrences: number;
+}
+
 // ── Form data ────────────────────────────────────────────────────────────────
 
 interface FormFields {
@@ -805,7 +811,7 @@ function SettingsPanel({
 //    e propõe atualizações ao campos-padrao.md via checkbox.
 // Princípio comum: o app PROPÕE, o usuário ACEITA — autonomia preservada.
 
-type LearningTab = "evitar" | "estilo" | "campos";
+type LearningTab = "evitar" | "estilo" | "campos" | "frases";
 
 function LearningPanel({
   vaultPath,
@@ -847,11 +853,19 @@ function LearningPanel({
         >
           campos-padrão.md
         </button>
+        <button
+          type="button"
+          className={`tab ${tab === "frases" ? "active" : ""}`}
+          onClick={() => setTab("frases")}
+        >
+          frases-modelo
+        </button>
       </div>
 
       {tab === "evitar" && <EvitarTab vaultPath={vaultPath} />}
       {tab === "estilo" && <EstiloTab vaultPath={vaultPath} />}
       {tab === "campos" && <CamposTab vaultPath={vaultPath} />}
+      {tab === "frases" && <FrasesTab vaultPath={vaultPath} />}
     </div>
   );
 }
@@ -1360,6 +1374,156 @@ function CamposTab({ vaultPath }: { vaultPath: string | null }) {
               </button>
             </div>
           )}
+        </>
+      )}
+    </>
+  );
+}
+
+function FrasesTab({ vaultPath }: { vaultPath: string | null }) {
+  const [analyzing, setAnalyzing] = useState(false);
+  const [templates, setTemplates] = useState<PhraseTemplate[] | null>(null);
+  const [selected, setSelected] = useState<Set<number>>(new Set());
+  const [applying, setApplying] = useState(false);
+  const [appliedFile, setAppliedFile] = useState<string | null>(null);
+  const [error, setError] = useState<string | null>(null);
+
+  const handleAnalyze = async () => {
+    setError(null);
+    setTemplates(null);
+    setAppliedFile(null);
+    setAnalyzing(true);
+    try {
+      const out = await invoke<PhraseTemplate[]>("analyze_phrase_templates");
+      setTemplates(out);
+      setSelected(new Set(out.map((_, i) => i))); // tudo selecionado por padrão
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setAnalyzing(false);
+    }
+  };
+
+  const toggleSelected = (idx: number) => {
+    setSelected((prev) => {
+      const next = new Set(prev);
+      if (next.has(idx)) next.delete(idx);
+      else next.add(idx);
+      return next;
+    });
+  };
+
+  const handleApply = async () => {
+    if (!templates || selected.size === 0) return;
+    setApplying(true);
+    setError(null);
+    try {
+      const chosen = templates.filter((_, i) => selected.has(i));
+      const file = await invoke<string>("apply_phrase_templates", { templates: chosen });
+      setAppliedFile(file);
+      setTemplates(null);
+      setSelected(new Set());
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setApplying(false);
+    }
+  };
+
+  return (
+    <>
+      <p className="help">
+        O Artemis envia até 80 devolutivas aprovadas para a IA, que identifica frases
+        que se repetem (com variações de datas/versões/caminhos) e propõe templates
+        parametrizados. Frases já presentes no <code>campos-padrao.md</code> são filtradas
+        automaticamente.
+      </p>
+
+      {!vaultPath && (
+        <p className="key-error">
+          ⚠ Vault não configurado. Configure a pasta nas Configurações antes de aplicar.
+        </p>
+      )}
+
+      {!templates && !appliedFile && (
+        <div className="row">
+          <button
+            type="button"
+            onClick={handleAnalyze}
+            disabled={analyzing || !vaultPath}
+            title="Pede à IA novos templates de frase recorrentes. Mínimo 5 aprovadas."
+          >
+            {analyzing ? "Analisando até 80 aprovadas..." : "Buscar frases-modelo"}
+          </button>
+        </div>
+      )}
+
+      {error && <p className="key-error">{error}</p>}
+
+      {appliedFile && (
+        <p className="vault-message">
+          ✓ Frases-modelo adicionadas em <code>{appliedFile}</code>. Confira no
+          Obsidian — os itens vêm sob marker <code>&lt;!-- auto-aprendidos em DATA --&gt;</code>.
+        </p>
+      )}
+
+      {templates && templates.length === 0 && (
+        <p className="help">
+          Nenhuma frase-modelo nova emergiu. Aprove mais devolutivas (especialmente
+          com texto repetitivo padrão) ou tente novamente.
+        </p>
+      )}
+
+      {templates && templates.length > 0 && (
+        <>
+          <div className="selection-toolbar">
+            <button
+              type="button"
+              className="secondary"
+              onClick={() => setSelected(new Set(templates.map((_, i) => i)))}
+            >
+              Selecionar todas
+            </button>
+            <button
+              type="button"
+              className="secondary"
+              onClick={() => setSelected(new Set())}
+            >
+              Nenhuma
+            </button>
+            <span className="counter">
+              {selected.size}/{templates.length} selecionada(s)
+            </span>
+          </div>
+
+          <div className="suggestions-list">
+            {templates.map((t, i) => (
+              <label key={i} className="suggestion-item">
+                <input
+                  type="checkbox"
+                  checked={selected.has(i)}
+                  onChange={() => toggleSelected(i)}
+                />
+                <div className="suggestion-body">
+                  <div className="phrase-situation">{t.situation}</div>
+                  <div className="phrase-template">{t.template}</div>
+                  <div className="suggestion-meta">
+                    ~{t.occurrences} ocorrência{t.occurrences === 1 ? "" : "s"} estimada{t.occurrences === 1 ? "" : "s"}
+                  </div>
+                </div>
+              </label>
+            ))}
+          </div>
+
+          <div className="row">
+            <button
+              type="button"
+              onClick={handleApply}
+              disabled={applying || selected.size === 0 || !vaultPath}
+            >
+              {applying ? "Aplicando..." : `Adicionar ${selected.size} ao campos-padrao.md`}
+            </button>
+          </div>
         </>
       )}
     </>

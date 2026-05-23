@@ -196,6 +196,8 @@ pub fn run() {
             commands::apply_style_synthesis,
             commands::analyze_campos,
             commands::apply_campos_suggestions,
+            commands::analyze_phrase_templates,
+            commands::apply_phrase_templates,
             commands::get_autostart_enabled,
             commands::set_autostart_enabled,
             commands::check_for_update,

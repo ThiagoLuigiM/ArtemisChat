@@ -978,3 +978,23 @@ html.window-chat body {
   opacity: 0.5;
   cursor: not-allowed;
 }
+
+/* Frases-modelo (#21) — situation em destaque, template em blockquote */
+.phrase-situation {
+  font-weight: 600;
+  font-size: 12.5px;
+  color: #b8d4f0;
+  margin-bottom: 4px;
+}
+
+.phrase-template {
+  font-size: 12.5px;
+  color: #c8c8d0;
+  line-height: 1.5;
+  padding: 6px 10px;
+  background: #18181b;
+  border-left: 3px solid #5b6cff;
+  border-radius: 0 4px 4px 0;
+  white-space: pre-wrap;
+  word-wrap: break-word;
+}

@@ -281,6 +281,105 @@ pub async fn analyze_edits(
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// extract_phrase_templates — analisa amostras de final_output das aprovadas
+// para extrair frases recorrentes como templates parametrizados. (#21)
+// ─────────────────────────────────────────────────────────────────────────────
+
+#[derive(serde::Deserialize, serde::Serialize, Clone, Debug)]
+pub struct PhraseTemplate {
+    pub situation: String,
+    pub template: String,
+    pub occurrences: u32,
+}
+
+/// Recebe N final_outputs aprovados + o campos-padrao.md atual e retorna
+/// até 8 sugestões de novas frases-modelo que NÃO estão no arquivo atual.
+pub async fn extract_phrase_templates(
+    api_key: &str,
+    samples: &[String],
+    current_campos_md: &str,
+) -> anyhow::Result<Vec<PhraseTemplate>> {
+    if samples.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let mut samples_text = String::with_capacity(samples.len() * 600);
+    for (i, s) in samples.iter().enumerate() {
+        samples_text.push_str(&format!("\n=== DEVOLUTIVA {} ===\n{}\n", i + 1, s.trim()));
+    }
+
+    let current_block = if current_campos_md.trim().is_empty() {
+        "(arquivo vazio — qualquer frase recorrente é candidato válido)".to_string()
+    } else {
+        current_campos_md.trim().to_string()
+    };
+
+    let prompt = format!(
+        "Você analisa devolutivas técnicas aprovadas de um sistema ERP para identificar frases-modelo recorrentes que podem virar templates parametrizados no arquivo `campos-padrao.md`.\n\n\
+        Você recebe:\n\
+        1. {n} devolutivas que o usuário APROVOU (são o output final aceito).\n\
+        2. O conteúdo atual do `campos-padrao.md` (incluindo a seção 'Frases-modelo aprovadas' que já existe).\n\n\
+        Sua tarefa: identificar frases que aparecem em ≥ 3 devolutivas (literalmente ou com variações pequenas como datas, versões, caminhos) e propor um TEMPLATE parametrizado para cada.\n\n\
+        REGRAS:\n\
+        - NÃO proponha frases que já estejam na seção 'Frases-modelo aprovadas' do arquivo atual (mesma situação ou template equivalente). Verifique cuidadosamente antes de sugerir.\n\
+        - Para cada template: use `<placeholder>` nas partes variáveis (ex: `<vX.Y.Z — dd/mm/aaaa>`, `<caminho>`, `<nome do arquivo>`).\n\
+        - `situation` é um título curto descrevendo QUANDO usar a frase (ex: 'Para correção com troca de executável', 'Para validação de cenário fiscal específico').\n\
+        - `template` é o texto da frase em prosa, com placeholders. Mantenha o estilo direto do usuário.\n\
+        - `occurrences` é sua estimativa de quantas das devolutivas casam com o template.\n\
+        - Máximo 8 sugestões — priorize as MAIS frequentes e MAIS úteis (frases longas, com mais informação, valem mais que frases curtas óbvias).\n\
+        - Se nenhuma frase claramente recorrente emergir, retorne `[]`.\n\n\
+        FORMATO DE SAÍDA:\n\
+        - APENAS um array JSON, sem texto antes ou depois, sem fences markdown.\n\
+        - Cada item: `{{\"situation\": \"<string>\", \"template\": \"<string com placeholders>\", \"occurrences\": <número>}}`.\n\n\
+        ═══ CAMPOS-PADRAO.MD ATUAL ═══\n\n{current}\n\n\
+        ═══ DEVOLUTIVAS APROVADAS ═══\n{samples}",
+        n = samples.len(),
+        current = current_block,
+        samples = samples_text
+    );
+
+    let messages = vec![ChatMessage {
+        role: "user".to_string(),
+        content: prompt,
+    }];
+
+    let body = ClassifyRequest {
+        model: "deepseek-chat",
+        messages: &messages,
+        stream: false,
+        temperature: 0.2,
+        max_tokens: 2048,
+    };
+
+    let client = reqwest::Client::new();
+    let resp = client
+        .post(API_URL)
+        .bearer_auth(api_key)
+        .header("Content-Type", "application/json")
+        .json(&body)
+        .send()
+        .await?
+        .error_for_status()?
+        .json::<ClassifyResponse>()
+        .await?;
+
+    let raw = resp
+        .choices
+        .first()
+        .map(|c| c.message.content.as_str())
+        .unwrap_or("[]");
+
+    let json_slice = extract_json_array(raw).unwrap_or("[]");
+    match serde_json::from_str::<Vec<PhraseTemplate>>(json_slice) {
+        Ok(templates) => Ok(templates),
+        Err(e) => {
+            tracing::warn!("falha ao parsear templates JSON: {} (raw: {:?})", e, raw);
+            Ok(Vec::new())
+        }
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // synthesize_style — recebe o estilo.md atual + amostras (raw_input, final_output)
 // e pede à IA uma versão refinada do estilo.md, preservando regras existentes.
 // Retorna markdown puro pronto para gravar no vault (após preview pelo usuário).

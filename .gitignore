@@ -40,3 +40,10 @@ src-tauri/gen/schemas/
 
 # OS
 Thumbs.db
+
+# Build artifacts / releases baixadas localmente para teste
+*.msi
+*.msi.sig
+ArtemisChat-*.zip
+Artemis_*.zip
+latest.json

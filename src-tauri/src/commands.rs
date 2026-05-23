@@ -31,6 +31,106 @@ pub async fn open_chat(app: AppHandle) -> Result<(), String> {
     Ok(())
 }
 
+// ───────────────────────────────────────────────────────────────────────────────
+// Frases-modelo via IA (#21) — extrai templates recorrentes do final_output
+// das aprovadas e propõe acréscimos à seção "Frases-modelo aprovadas" do
+// campos-padrao.md.
+// ───────────────────────────────────────────────────────────────────────────────
+
+const ANALYZE_PHRASES_LIMIT: usize = 80;
+const ANALYZE_PHRASES_MIN: usize = 5;
+
+/// Lê até 80 aprovadas + o campos-padrao.md atual e pede à IA frases-modelo
+/// recorrentes que ainda não estão no arquivo. NÃO escreve em lugar nenhum.
+#[tauri::command]
+pub async fn analyze_phrase_templates(
+    history_state: State<'_, HistoryState>,
+    vault_state: State<'_, VaultState>,
+) -> Result<Vec<deepseek::PhraseTemplate>, String> {
+    let api_key = settings::load_api_key()
+        .map_err(|e| e.to_string())?
+        .ok_or_else(|| "API key da DeepSeek não configurada.".to_string())?;
+
+    let vault_path = vault_state
+        .loader
+        .read()
+        .unwrap()
+        .status()
+        .path
+        .clone()
+        .ok_or_else(|| "Vault não configurado — selecione a pasta nas Configurações.".to_string())?;
+
+    let entries = history_state
+        .history
+        .list_recent(ANALYZE_PHRASES_LIMIT, true)
+        .map_err(|e| e.to_string())?;
+
+    if entries.len() < ANALYZE_PHRASES_MIN {
+        return Err(format!(
+            "Apenas {} aprovada(s) disponível(eis). Aprove ao menos {} devolutivas para gerar sugestões.",
+            entries.len(),
+            ANALYZE_PHRASES_MIN
+        ));
+    }
+
+    let samples: Vec<String> = entries.into_iter().map(|e| e.final_output).collect();
+    let current_campos = vault::read_campos_padrao(&PathBuf::from(&vault_path));
+
+    tracing::info!(
+        "analyze_phrase_templates: {} amostras, campos atual: {} chars",
+        samples.len(),
+        current_campos.len()
+    );
+
+    let templates = deepseek::extract_phrase_templates(&api_key, &samples, &current_campos)
+        .await
+        .map_err(|e| format!("Análise falhou: {}", e))?;
+
+    tracing::info!("DeepSeek retornou {} templates", templates.len());
+    Ok(templates)
+}
+
+/// Appenda os templates aceitos à seção "Frases-modelo aprovadas" do
+/// campos-padrao.md. Backup em .bak + reload do vault + emit `vault-changed`.
+#[tauri::command]
+pub fn apply_phrase_templates(
+    templates: Vec<deepseek::PhraseTemplate>,
+    app: AppHandle,
+    vault_state: State<'_, VaultState>,
+) -> Result<String, String> {
+    if templates.is_empty() {
+        return Err("Nenhuma frase-modelo selecionada.".to_string());
+    }
+
+    let vault_path = vault_state
+        .loader
+        .read()
+        .unwrap()
+        .status()
+        .path
+        .clone()
+        .ok_or_else(|| "Vault não configurado — selecione a pasta nas Configurações.".to_string())?;
+
+    let pairs: Vec<(String, String)> = templates
+        .into_iter()
+        .map(|t| (t.situation, t.template))
+        .collect();
+
+    let path = PathBuf::from(&vault_path);
+    let written = vault::append_phrase_templates(&path, &pairs).map_err(|e| e.to_string())?;
+
+    {
+        let mut l = vault_state.loader.write().unwrap();
+        l.reload();
+        let _ = app.emit("vault-changed", l.status().clone());
+    }
+
+    Ok(written
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "campos-padrao.md".to_string()))
+}
+
 // ── Autostart (Fase 4) ─────────────────────────────────────────────────────
 
 #[tauri::command]

@@ -142,6 +142,8 @@ DevReturn/                            ← pasta raiz (nome legado, não renomead
 | `apply_style_synthesis` | `new_content: String` | `String` (nome do arquivo escrito) | Faz backup em `estilo.md.bak` (sobrescrito a cada vez) + substitui `estilo.md` + recarrega vault + emite `vault-changed` |
 | `analyze_campos` | — | `CamposSuggestions` | Lê até 100 aprovadas; extrai release semver mais recente + caminhos `A > B > C` por frequência (parsing puro, sem IA). Filtra os já presentes no campos-padrao.md. NÃO escreve em lugar nenhum |
 | `apply_campos_suggestions` | `release_accepted: Option<String>, paths_accepted: Vec<String>` | `String` (nome do arquivo escrito) | Faz backup em `campos-padrao.md.bak`; substitui linha "Release atual" via regex/parser; appenda caminhos na seção "Caminhos recorrentes" com marker `<!-- auto-aprendidos em DATA -->`; recarrega vault |
+| `analyze_phrase_templates` | — | `Vec<PhraseTemplate>` | Lê até 80 aprovadas + campos-padrao atual; chama DeepSeek com prompt que pede JSON `[{situation, template, occurrences}]` evitando duplicar frases já presentes. NÃO escreve em lugar nenhum |
+| `apply_phrase_templates` | `templates: Vec<PhraseTemplate>` | `String` (nome do arquivo escrito) | Faz backup em `campos-padrao.md.bak`; appenda templates aceitos na seção "Frases-modelo aprovadas" (formato `**<situation>:**\n> <template>`) sob marker; recarrega vault |
 | `get_autostart_enabled` | — | `bool` | Lê do registro do Windows se o app está configurado pra iniciar com o sistema |
 | `set_autostart_enabled` | `enabled: bool` | — | Liga/desliga autostart via `tauri-plugin-autostart` |
 | `check_for_update` | — | `UpdateInfo { available, current_version, new_version, release_notes }` | Consulta o endpoint do updater (GitHub releases) e retorna info da última versão. NÃO baixa |
@@ -174,7 +176,7 @@ ChatWindow  (view: "form" | "result";  showSettings, showLearning: boolean)
 │     ├── API key  (invoke set_api_key)
 │     └── Vault picker (dialog → invoke set_vault_path / seed_vault)
 └── showLearning   → LearningPanel  (botão 🧠 no header)
-      ├── Tabs: [ evitar.md ] [ estilo.md ] [ campos-padrão.md ]
+      ├── Tabs: [ evitar.md ] [ estilo.md ] [ campos-padrão.md ] [ frases-modelo ]
       ├── Tab "evitar" → EvitarTab (#18)
       │     ├── Contador de edições aprovadas disponíveis
       │     ├── Botão "Analisar minhas edições" → invoke(analyze_edits)
@@ -185,11 +187,15 @@ ChatWindow  (view: "form" | "result";  showSettings, showLearning: boolean)
       │     ├── Botão "Sintetizar estilo.md" → invoke(synthesize_style)
       │     ├── Após retorno: textarea editável (50vh) com a proposta
       │     └── Botões "Cancelar" / "Substituir estilo.md" → invoke(apply_style_synthesis)
-      └── Tab "campos" → CamposTab (#20)
-            ├── Botão "Analisar histórico" → invoke(analyze_campos) (sem IA, parsing puro)
-            ├── Seção "Release atual": checkbox único com a release semver mais recente
-            ├── Seção "Caminhos novos": lista de checkboxes + ocorrências
-            └── Botão "Aplicar N mudanças" → invoke(apply_campos_suggestions)
+      ├── Tab "campos" → CamposTab (#20)
+      │     ├── Botão "Analisar histórico" → invoke(analyze_campos) (sem IA, parsing puro)
+      │     ├── Seção "Release atual": checkbox único com a release semver mais recente
+      │     ├── Seção "Caminhos novos": lista de checkboxes + ocorrências
+      │     └── Botão "Aplicar N mudanças" → invoke(apply_campos_suggestions)
+      └── Tab "frases" → FrasesTab (#21)
+            ├── Botão "Buscar frases-modelo" → invoke(analyze_phrase_templates) (~30-60s)
+            ├── Lista de PhraseTemplate com checkboxes (situation, template, ocorrências)
+            └── Botão "Adicionar N ao campos-padrao.md" → invoke(apply_phrase_templates)
 ```
 
 **Formato de saída da IA** — tags `[n]Título :[/n]` parseadas por `renderResult()` em `<strong className="devolutiva-header">`. Sem markdown (`##`, `**`) na saída.
@@ -425,13 +431,30 @@ Pacote completo de integração com o sistema operacional Windows.
 - Usa `tauri-apps/tauri-action@v0` para build + sign + criar Draft Release com MSI assinado e `latest.json` (manifest do updater)
 - **Requer secrets configurados no repo GitHub** (vide próximos passos)
 
+### ✅ #21 — Frases-modelo via IA (concluída 2026-05-23)
+Última fronteira do aprendizado adaptativo. Analisa o `final_output` de até 80 aprovadas (editadas ou não) + o `campos-padrao.md` atual, e a IA extrai **templates parametrizados** de frases que se repetem (literalmente ou com variações de datas/versões/caminhos) em ≥ 3 devolutivas, evitando duplicar o que já está no arquivo.
+
+**Backend:**
+- `deepseek::extract_phrase_templates(api_key, samples, current_campos) -> Vec<PhraseTemplate>` — chamada não-streaming, temperature 0.2, max_tokens 2048. Prompt instrui a IA a (a) retornar JSON array puro, (b) usar `<placeholder>` nas partes variáveis, (c) verificar redundância contra o `campos-padrao.md` atual, (d) máximo 8 sugestões priorizando frequência e utilidade.
+- Tipo `PhraseTemplate { situation, template, occurrences }` em `deepseek.rs`. Parser reusa `extract_json_array` (do #18).
+- `vault::append_phrase_templates(path, templates)` — backup em `.bak`, encontra seção `## Frases-modelo aprovadas` (case-insensitive) ou cria nova no fim. Formato de cada item: `**<situation>:**\n> <template>` sob marker `<!-- auto-aprendidos em DATA -->`.
+- Comandos: `analyze_phrase_templates` (mínimo 5 aprovadas), `apply_phrase_templates { templates }`.
+
+**Frontend:**
+- 4ª tab `FrasesTab` no LearningPanel (mesma estrutura do `EvitarTab`)
+- Estilos `.phrase-situation` (destaque azul) e `.phrase-template` (blockquote com border-left)
+
+**Tripleto+1 fechado:** `evitar.md` (#18 negativo) + `estilo.md` (#19 positivo) + `campos-padrao.md` em 2 dimensões: factual (#20 release/caminhos, parsing puro) + semântico (#21 frases-modelo via IA).
+
 ### ⏳ Próximas fases pendentes
-- **#21 (opcional) — Frases-modelo via IA** — análise semântica do `final_output` das aprovadas para detectar templates emergentes
-- **Configurabilidade de hotkey** — UI de captura + persistência em config.json + re-registro dinâmico
+- **Configurabilidade de hotkey** — UI de captura + persistência em config.json + re-registro dinâmico do global shortcut
+- **Cifrar API key com DPAPI** — substituir plaintext em `config.json` por `CryptProtectData` escopo current-user (vide gotcha #1)
 
-## Próximo passo imediato (status 2026-05-23 sessão 5)
+## Próximo passo imediato (status 2026-05-23 sessão 6)
 
-**Fase 4 (polimento desktop)** entregue: tray + hotkey + autostart + auto-updater + workflow CI. Backend + frontend passam em `cargo check` (0 warnings), `cargo test --lib` (46/46) e `tsc --noEmit` (0 erros).
+**#21 (frases-modelo via IA)** entregue. 4ª tab no LearningPanel completa o sistema de auto-aprendizado. Backend + frontend passam em `cargo check` (0 warnings), `cargo test --lib` (49/49, +3 novos para `append_phrase_templates`) e `tsc --noEmit` (0 erros).
+
+### ⚠️ Setup pendente para o auto-updater funcionar (ação do usuário, ainda do roteiro anterior)
 
 ### ⚠️ Setup pendente para o auto-updater funcionar (ação do usuário)
 
@@ -548,4 +571,4 @@ Em `C:\Users\Borge\.claude\projects\E--Projetos-Thiago-Space-WorkSpaceArtemis\me
 
 ---
 
-**Última atividade:** Sessão Claude Opus 4.7 (quinta continuação) em 2026-05-23 BRT. Entregue nesta sessão: **Fase 4 — polimento desktop completa**. Tray icon (Tauri 2 core feature `tray-icon`) com menu Abrir/Configurações/Sair + click esquerdo abre chat. Global hotkey `Ctrl+Shift+D` (hardcoded, configurabilidade pra depois). Autostart Windows via `tauri-plugin-autostart` + toggle em SettingsPanel. Auto-updater completo via `tauri-plugin-updater`: par de chaves minisign gerado (`.tauri/artemis.key` privada gitignored + pública inline em `tauri.conf.json`), endpoint apontando para GitHub releases do repo `ThiagoLuigiM/ArtemisChat`, UI no SettingsPanel com botão "Verificar" + release notes + "Instalar e reiniciar". Workflow `.github/workflows/release.yml` que builda MSI assinado em tag push (`v*`). Git inicializado localmente com `.gitignore` ampliado (cobre target/, node_modules/, .tauri/, *.env, *.key). 46/46 testes Rust passam, `cargo check` limpo, `tsc --noEmit` limpo. **Pendente do usuário:** push inicial, configurar secrets `TAURI_SIGNING_PRIVATE_KEY` + `TAURI_SIGNING_PRIVATE_KEY_PASSWORD` no repo GitHub, criar primeira tag para disparar release. Próximas iterações opcionais: #21 (frases-modelo via IA), configurabilidade de hotkey.
+**Última atividade:** Sessão Claude Opus 4.7 (sexta continuação) em 2026-05-23 BRT. Entregue nesta sessão: **#21 — frases-modelo via IA**. `deepseek::extract_phrase_templates` envia até 80 final_outputs aprovados + campos-padrao.md atual num único prompt; pede JSON `[{situation, template, occurrences}]` com placeholders nas partes variáveis e checagem de não-redundância contra o arquivo atual. Reusa parser robusto `extract_json_array`. `vault::append_phrase_templates` faz backup em `.bak`, encontra ou cria a seção `## Frases-modelo aprovadas`, e appenda items no formato `**<situation>:**\n> <template>` sob marker `<!-- auto-aprendidos em DATA -->`. 4ª tab `FrasesTab` no LearningPanel; estilos `.phrase-situation`/`.phrase-template` adicionados. 49/49 testes Rust (3 novos), `cargo check` 0 warnings, `tsc --noEmit` 0 erros. Sistema de auto-aprendizado agora completo em 4 dimensões: negativo (evitar.md #18) + positivo (estilo.md #19) + factual (campos #20) + semântico (frases #21). Sessão anterior (5ª) entregou Fase 4 + setup do GitHub repo + release v0.1.0 publicada com sucesso (workflow CI rodou ok).

@@ -459,6 +459,86 @@ fn append_paths_to_section(content: String, new_paths: &[String], date: &str) ->
     }
 }
 
+/// Appenda frases-modelo aprovadas pelo usuário em `campos-padrao.md`,
+/// dentro da seção `## Frases-modelo aprovadas`. Cria a seção no fim do arquivo
+/// se ela não existir. Faz backup em `campos-padrao.md.bak`.
+///
+/// Cada template entra como bloco `**<situation>:**\n> <template>\n` sob
+/// um marker HTML `<!-- auto-aprendidos em DATA -->` (mesmo padrão de #18/#20).
+pub fn append_phrase_templates(
+    vault_path: &Path,
+    templates: &[(String, String)], // (situation, template)
+) -> anyhow::Result<PathBuf> {
+    if templates.is_empty() {
+        anyhow::bail!("nenhuma frase-modelo a aplicar");
+    }
+
+    let file_path = vault_path.join("campos-padrao.md");
+    let backup_path = vault_path.join("campos-padrao.md.bak");
+    let original = fs::read_to_string(&file_path).unwrap_or_default();
+
+    if !original.is_empty() {
+        fs::write(&backup_path, &original)?;
+    }
+
+    let date = chrono::Local::now().format("%d/%m/%Y %H:%M").to_string();
+    let mut block = format!("\n<!-- auto-aprendidos em {} -->\n", date);
+    for (situation, template) in templates {
+        block.push_str(&format!("\n**{}:**\n> {}\n", situation.trim(), template.trim()));
+    }
+
+    let content = insert_into_phrases_section(&original, &block);
+
+    fs::write(&file_path, content)?;
+    Ok(file_path)
+}
+
+fn insert_into_phrases_section(content: &str, block: &str) -> String {
+    let lines: Vec<&str> = content.lines().collect();
+    let section_idx = lines.iter().position(|l| {
+        let t = l.trim_start();
+        t.starts_with("## ") && t.to_lowercase().contains("frases-modelo")
+    });
+
+    match section_idx {
+        Some(start) => {
+            // Encontra fim da seção (próximo "## " ou EOF)
+            let mut end = lines.len();
+            for (i, l) in lines.iter().enumerate().skip(start + 1) {
+                if l.trim_start().starts_with("## ") {
+                    end = i;
+                    break;
+                }
+            }
+            let mut out = String::with_capacity(content.len() + block.len());
+            for (i, l) in lines.iter().enumerate() {
+                out.push_str(l);
+                out.push('\n');
+                if i + 1 == end {
+                    out.push_str(block);
+                }
+            }
+            if end == lines.len() {
+                out.push_str(block);
+            }
+            out
+        }
+        None => {
+            // Cria nova seção no fim
+            let mut out = content.to_string();
+            if !out.is_empty() && !out.ends_with('\n') {
+                out.push('\n');
+            }
+            if !out.is_empty() {
+                out.push('\n');
+            }
+            out.push_str("## Frases-modelo aprovadas\n");
+            out.push_str(block);
+            out
+        }
+    }
+}
+
 pub fn seed_vault(target_path: &Path) -> anyhow::Result<Vec<String>> {
     fs::create_dir_all(target_path)?;
 
@@ -649,6 +729,65 @@ mod tests {
         assert!(apply_campos_changes(&dir, None, &[]).is_err());
         // Arquivo intocado
         assert_eq!(fs::read_to_string(dir.join("campos-padrao.md")).unwrap(), "conteudo");
+        assert!(!dir.join("campos-padrao.md.bak").exists());
+    }
+
+    #[test]
+    fn append_phrase_templates_appends_to_existing_section() {
+        let dir = temp_vault();
+        let original = "# Header\n\n## Frases-modelo aprovadas\n\n**Existente:**\n> Template antigo\n\n## Outra seção\nfim\n";
+        fs::write(dir.join("campos-padrao.md"), original).unwrap();
+
+        let templates = vec![
+            (
+                "Para correção fiscal".to_string(),
+                "A correção <X> foi liberada em <vY.Y.Z>.".to_string(),
+            ),
+        ];
+        append_phrase_templates(&dir, &templates).unwrap();
+
+        let new_content = fs::read_to_string(dir.join("campos-padrao.md")).unwrap();
+        // Conteúdo antigo preservado
+        assert!(new_content.contains("**Existente:**"));
+        assert!(new_content.contains("> Template antigo"));
+        assert!(new_content.contains("## Outra seção"));
+        // Novo template aparece com marker
+        assert!(new_content.contains("<!-- auto-aprendidos em"));
+        assert!(new_content.contains("**Para correção fiscal:**"));
+        assert!(new_content.contains("> A correção <X> foi liberada em <vY.Y.Z>."));
+        // Novo template aparece ANTES da próxima seção
+        let idx_novo = new_content.find("Para correção fiscal").unwrap();
+        let idx_outra = new_content.find("## Outra seção").unwrap();
+        assert!(idx_novo < idx_outra);
+        // Backup criado
+        assert_eq!(fs::read_to_string(dir.join("campos-padrao.md.bak")).unwrap(), original);
+    }
+
+    #[test]
+    fn append_phrase_templates_creates_section_if_absent() {
+        let dir = temp_vault();
+        fs::write(dir.join("campos-padrao.md"), "# Apenas o título\n").unwrap();
+
+        let templates = vec![
+            ("Caso A".to_string(), "Frase A.".to_string()),
+            ("Caso B".to_string(), "Frase B.".to_string()),
+        ];
+        append_phrase_templates(&dir, &templates).unwrap();
+
+        let new_content = fs::read_to_string(dir.join("campos-padrao.md")).unwrap();
+        assert!(new_content.contains("## Frases-modelo aprovadas"));
+        assert!(new_content.contains("**Caso A:**"));
+        assert!(new_content.contains("> Frase A."));
+        assert!(new_content.contains("**Caso B:**"));
+    }
+
+    #[test]
+    fn append_phrase_templates_rejects_empty_input() {
+        let dir = temp_vault();
+        fs::write(dir.join("campos-padrao.md"), "conteudo original").unwrap();
+        assert!(append_phrase_templates(&dir, &[]).is_err());
+        // Arquivo original intacto, sem backup
+        assert_eq!(fs::read_to_string(dir.join("campos-padrao.md")).unwrap(), "conteudo original");
         assert!(!dir.join("campos-padrao.md.bak").exists());
     }
 }
