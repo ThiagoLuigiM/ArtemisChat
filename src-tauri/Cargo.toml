@@ -1,0 +1,57 @@
+[package]
+name = "artemis"
+version = "0.1.0"
+description = "Artemis — assistente flutuante de devolutivas técnicas"
+authors = ["Thiago Borges"]
+edition = "2021"
+
+[lib]
+name = "artemis_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = ["tray-icon"] }
+tauri-plugin-dialog = "2"
+tauri-plugin-global-shortcut = "2"
+tauri-plugin-autostart = "2"
+tauri-plugin-updater = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# Async runtime
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "sync"] }
+
+# HTTP client with streaming (rustls-tls = no system OpenSSL needed on Windows)
+reqwest = { version = "0.12", default-features = false, features = ["json", "stream", "rustls-tls"] }
+reqwest-eventsource = "0.6"
+futures-util = "0.3"
+
+# Filesystem watching
+notify = "6"
+notify-debouncer-mini = "0.4"
+
+# SQLite (bundled — sem dependência do SQLite do sistema)
+rusqlite = { version = "0.32", features = ["bundled"] }
+
+# Datas formatadas para o histórico curado
+chrono = { version = "0.4", default-features = false, features = ["clock"] }
+
+# Error handling
+anyhow = "1"
+thiserror = "2"
+
+# Logging
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# Paths
+dirs = "5"
+
+[profile.release]
+opt-level = "s"
+lto = true
+codegen-units = 1
+strip = true

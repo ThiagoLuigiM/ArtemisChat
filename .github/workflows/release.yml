@@ -1,0 +1,58 @@
+name: Release Artemis
+
+# Dispara quando uma tag `v*` é pushed (ex: v0.1.0, v1.2.3).
+# Cria um Draft Release no GitHub com o MSI assinado + manifest `latest.json`
+# que o updater do app consulta. O mantenedor precisa publicar o draft manualmente
+# para liberar a atualização aos usuários.
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch: # permite disparar manual via Actions tab
+
+jobs:
+  build-windows:
+    runs-on: windows-latest
+    permissions:
+      contents: write # necessário para criar release
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: "npm"
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Rust
+        uses: swatinem/rust-cache@v2
+        with:
+          workspaces: "./src-tauri -> target"
+
+      - name: Install npm dependencies
+        run: npm ci
+
+      - name: Build + sign + create release
+        uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        with:
+          tagName: ${{ github.ref_name }}
+          releaseName: "Artemis ${{ github.ref_name }}"
+          releaseBody: |
+            ## Artemis ${{ github.ref_name }}
+
+            Veja o [HANDOFF.md](HANDOFF.md) para mudanças desta versão.
+
+            **Instalação:** baixe o `.msi` abaixo e execute. Updates futuros chegam
+            automaticamente via o painel de Configurações do app.
+          releaseDraft: true
+          prerelease: false
+          includeUpdaterJson: true

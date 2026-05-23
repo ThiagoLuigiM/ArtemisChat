@@ -1,0 +1,980 @@
+/* === Base === */
+* {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#root {
+  margin: 0;
+  padding: 0;
+  width: 100%;
+  height: 100%;
+  overflow: hidden;
+}
+
+body {
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto,
+    "Helvetica Neue", Arial, sans-serif;
+  font-size: 14px;
+  -webkit-font-smoothing: antialiased;
+}
+
+/* === FAB window === */
+html.window-fab,
+html.window-fab body,
+html.window-fab #root {
+  background: transparent !important;
+  user-select: none;
+}
+
+.fab {
+  width: 64px;
+  height: 64px;
+  margin: 4px;
+  border-radius: 50%;
+  background: linear-gradient(135deg, #5b6cff 0%, #4848e0 100%);
+  color: white;
+  cursor: grab;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.3),
+    0 2px 6px rgba(91, 108, 255, 0.4);
+  transition: transform 0.15s ease, box-shadow 0.15s ease;
+  user-select: none;
+  -webkit-user-select: none;
+}
+
+.fab:hover {
+  transform: scale(1.06);
+  box-shadow: 0 6px 20px rgba(0, 0, 0, 0.35),
+    0 4px 12px rgba(91, 108, 255, 0.5);
+}
+
+.fab:active {
+  cursor: grabbing;
+  transform: scale(0.96);
+}
+
+.fab svg {
+  pointer-events: none;
+}
+
+/* === Chat window === */
+html.window-chat body {
+  background: #1c1c1f;
+  color: #e8e8ec;
+}
+
+.chat-window {
+  display: flex;
+  flex-direction: column;
+  height: 100vh;
+}
+
+.chat-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 8px 12px;
+  border-bottom: 1px solid #2c2c30;
+  background: #232328;
+  -webkit-app-region: drag;
+}
+
+.chat-header .header-left {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  -webkit-app-region: no-drag;
+}
+
+.chat-header .title {
+  font-weight: 600;
+  font-size: 13px;
+  letter-spacing: 0.2px;
+}
+
+.vault-badge {
+  font-size: 11px;
+  padding: 2px 8px;
+  border-radius: 10px;
+  background: #2c2c30;
+  color: #8a8a92;
+  font-variant-numeric: tabular-nums;
+  cursor: default;
+  white-space: nowrap;
+}
+
+.vault-badge-empty {
+  background: #3a2a2a;
+  color: #b87a7a;
+}
+
+.vault-badge-error {
+  background: #4a2a2a;
+  color: #ff8a8a;
+}
+
+.chat-header .actions {
+  display: flex;
+  gap: 2px;
+  -webkit-app-region: no-drag;
+}
+
+.chat-header button {
+  background: transparent;
+  border: none;
+  color: #a8a8b0;
+  font-size: 14px;
+  padding: 4px 10px;
+  cursor: pointer;
+  border-radius: 4px;
+  line-height: 1;
+}
+
+.chat-header button:hover {
+  background: #2c2c30;
+  color: #e8e8ec;
+}
+
+.messages {
+  flex: 1;
+  overflow-y: auto;
+  padding: 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  scrollbar-width: thin;
+  scrollbar-color: #3a3a45 transparent;
+}
+
+.messages::-webkit-scrollbar {
+  width: 8px;
+}
+
+.messages::-webkit-scrollbar-thumb {
+  background: #3a3a45;
+  border-radius: 4px;
+}
+
+.empty-state {
+  color: #6c6c74;
+  text-align: center;
+  padding: 32px 16px;
+  font-size: 13px;
+  line-height: 1.6;
+}
+
+.empty-state .hint {
+  margin-top: 8px;
+  font-size: 11px;
+  color: #4a4a52;
+}
+
+.message {
+  border-radius: 8px;
+  padding: 10px 12px;
+  max-width: 100%;
+  position: relative;
+}
+
+.message-user {
+  background: #2a2a45;
+  align-self: flex-end;
+  max-width: 85%;
+}
+
+.message-assistant {
+  background: #232328;
+  border: 1px solid #2c2c30;
+}
+
+.message pre {
+  margin: 0;
+  white-space: pre-wrap;
+  word-wrap: break-word;
+  font-family: inherit;
+  font-size: 13px;
+  line-height: 1.55;
+}
+
+.copy-btn {
+  position: absolute;
+  top: 6px;
+  right: 6px;
+  background: #2c2c30;
+  color: #a8a8b0;
+  border: 1px solid #3a3a45;
+  border-radius: 4px;
+  font-size: 11px;
+  padding: 2px 8px;
+  cursor: pointer;
+  opacity: 0;
+  transition: opacity 0.15s ease;
+}
+
+.message-assistant:hover .copy-btn {
+  opacity: 1;
+}
+
+.copy-btn:hover {
+  background: #3a3a45;
+  color: #e8e8ec;
+}
+
+.input-row {
+  display: flex;
+  gap: 8px;
+  padding: 12px;
+  border-top: 1px solid #2c2c30;
+  background: #232328;
+}
+
+.input-row textarea {
+  flex: 1;
+  background: #1c1c1f;
+  color: #e8e8ec;
+  border: 1px solid #2c2c30;
+  border-radius: 6px;
+  padding: 8px 10px;
+  font-family: inherit;
+  font-size: 13px;
+  line-height: 1.5;
+  resize: none;
+  outline: none;
+}
+
+.input-row textarea:focus {
+  border-color: #5b6cff;
+}
+
+.input-row textarea:disabled {
+  opacity: 0.6;
+}
+
+.input-row button {
+  background: #5b6cff;
+  color: white;
+  border: none;
+  border-radius: 6px;
+  padding: 0 16px;
+  font-weight: 500;
+  font-size: 13px;
+  cursor: pointer;
+  align-self: flex-end;
+  height: 36px;
+  min-width: 70px;
+}
+
+.input-row button:hover:not(:disabled) {
+  background: #4c5cf0;
+}
+
+.input-row button:disabled {
+  background: #3a3a45;
+  color: #6c6c74;
+  cursor: not-allowed;
+}
+
+/* === Settings panel === */
+.settings-panel {
+  padding: 20px 24px;
+  height: 100vh;
+  box-sizing: border-box;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  background: #1c1c1f;
+  color: #e8e8ec;
+  overflow-y: auto;
+}
+
+.settings-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.settings-header h2 {
+  margin: 0;
+  font-size: 16px;
+  font-weight: 600;
+}
+
+.settings-header .close {
+  padding: 4px 10px;
+  background: transparent;
+  border: 1px solid #2c2c30;
+  color: #a8a8b0;
+  border-radius: 4px;
+  cursor: pointer;
+}
+
+.settings-header .close:hover {
+  background: #232328;
+  color: #e8e8ec;
+}
+
+.settings-section {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.settings-panel .divider {
+  border: none;
+  border-top: 1px solid #2c2c30;
+  margin: 4px 0;
+}
+
+.settings-panel label {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  font-size: 12px;
+  color: #a8a8b0;
+}
+
+.settings-panel label .label {
+  font-weight: 500;
+  color: #c8c8d0;
+}
+
+.settings-panel input {
+  background: #232328;
+  color: #e8e8ec;
+  border: 1px solid #2c2c30;
+  border-radius: 6px;
+  padding: 9px 12px;
+  font-size: 13px;
+  outline: none;
+  font-family: ui-monospace, "Cascadia Code", "Consolas", monospace;
+}
+
+.settings-panel input:focus {
+  border-color: #5b6cff;
+}
+
+.settings-panel input[readonly] {
+  color: #a8a8b0;
+}
+
+.settings-panel .path-row {
+  display: flex;
+  gap: 8px;
+}
+
+.settings-panel .path-row input {
+  flex: 1;
+}
+
+.settings-panel .help {
+  font-size: 11px;
+  color: #6c6c74;
+  margin: 0;
+  line-height: 1.5;
+}
+
+.settings-panel .help code {
+  background: #232328;
+  padding: 1px 5px;
+  border-radius: 3px;
+  font-size: 10.5px;
+}
+
+.settings-panel .row {
+  display: flex;
+  gap: 8px;
+  justify-content: flex-start;
+}
+
+.settings-panel button {
+  background: #5b6cff;
+  color: white;
+  border: none;
+  border-radius: 6px;
+  padding: 8px 16px;
+  font-size: 13px;
+  cursor: pointer;
+}
+
+.settings-panel button:hover:not(:disabled) {
+  background: #4c5cf0;
+}
+
+.settings-panel button:disabled {
+  background: #3a3a45;
+  color: #6c6c74;
+  cursor: not-allowed;
+}
+
+.settings-panel button.secondary {
+  background: transparent;
+  color: #c8c8d0;
+  border: 1px solid #3a3a45;
+}
+
+.settings-panel button.secondary:hover:not(:disabled) {
+  background: #232328;
+  color: #e8e8ec;
+  border-color: #4c4c52;
+}
+
+.vault-message {
+  font-size: 12px;
+  color: #8acf8a;
+  margin: 0;
+  padding: 8px 10px;
+  background: #1a2a1a;
+  border-radius: 4px;
+  border-left: 3px solid #5acf5a;
+}
+
+.key-error {
+  font-size: 12px;
+  color: #ff9a9a;
+  margin: 0;
+  padding: 8px 10px;
+  background: #2a1a1a;
+  border-radius: 4px;
+  border-left: 3px solid #cf5a5a;
+}
+
+.category-chip {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 6px 12px;
+  background: #1f2630;
+  border-bottom: 1px solid #2c3540;
+  font-size: 11.5px;
+  color: #8aa6c4;
+  letter-spacing: 0.2px;
+}
+
+.category-chip .category-label {
+  color: #6a7a8c;
+}
+
+.category-chip strong {
+  color: #b8d4f0;
+  font-weight: 600;
+}
+
+.category-chip .category-meta {
+  color: #6a7a8c;
+  margin-left: 4px;
+}
+
+/* === Result editor (textarea editável após streaming) === */
+
+.result-editor {
+  width: 100%;
+  min-height: 280px;
+  background: #1c1c1f;
+  color: #e8e8ec;
+  border: 1px solid #2c2c30;
+  border-radius: 6px;
+  padding: 12px 14px;
+  font-family: inherit;
+  font-size: 13px;
+  line-height: 1.55;
+  resize: vertical;
+  outline: none;
+  white-space: pre-wrap;
+}
+
+.result-editor:focus {
+  border-color: #5b6cff;
+}
+
+.result-editor:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+
+.result-error {
+  font-size: 12px;
+  color: #ff9a9a;
+  margin: 8px 0 0 0;
+  padding: 8px 10px;
+  background: #2a1a1a;
+  border-radius: 4px;
+  border-left: 3px solid #cf5a5a;
+}
+
+/* Footer de 3 botões do ResultView */
+.result-footer {
+  display: flex;
+  gap: 8px;
+  padding: 12px;
+  border-top: 1px solid #2c2c30;
+  background: #232328;
+  justify-content: space-between;
+  align-items: center;
+}
+
+.result-footer .btn-secondary {
+  margin-left: auto;
+}
+
+.btn-danger {
+  background: transparent;
+  color: #ff8a8a;
+  border: 1px solid #4a2a2a;
+  border-radius: 6px;
+  padding: 8px 14px;
+  font-size: 13px;
+  cursor: pointer;
+  font-weight: 500;
+}
+
+.btn-danger:hover:not(:disabled) {
+  background: #2a1a1a;
+  color: #ff9a9a;
+  border-color: #6a3a3a;
+}
+
+.btn-danger:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
+.vault-summary {
+  font-size: 11px;
+  color: #8a8a92;
+  padding: 6px 10px;
+  background: #232328;
+  border-radius: 4px;
+}
+
+/* === Learning panel: sugestões de evitar.md === */
+
+.edit-counter {
+  font-size: 13px;
+  padding: 12px 14px;
+  background: #232328;
+  border-radius: 6px;
+  color: #c8c8d0;
+  border-left: 3px solid #5b6cff;
+}
+
+.edit-counter strong {
+  color: #b8d4f0;
+  font-size: 16px;
+  font-variant-numeric: tabular-nums;
+}
+
+.selection-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 11.5px;
+  margin: 8px 0 4px 0;
+}
+
+.selection-toolbar .counter {
+  margin-left: auto;
+  color: #8a8a92;
+  font-variant-numeric: tabular-nums;
+}
+
+.selection-toolbar button.secondary {
+  padding: 4px 10px;
+  font-size: 11.5px;
+}
+
+.suggestions-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  max-height: 320px;
+  overflow-y: auto;
+  padding: 4px;
+  background: #18181b;
+  border-radius: 6px;
+  border: 1px solid #2c2c30;
+}
+
+.suggestion-item {
+  display: flex;
+  gap: 10px;
+  padding: 8px 10px;
+  border-radius: 4px;
+  cursor: pointer;
+  transition: background 0.1s ease;
+  align-items: flex-start;
+}
+
+.suggestion-item:hover {
+  background: #232328;
+}
+
+.suggestion-item input[type="checkbox"] {
+  margin-top: 2px;
+  cursor: pointer;
+  accent-color: #5b6cff;
+  flex-shrink: 0;
+}
+
+.suggestion-body {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  flex: 1;
+  min-width: 0;
+}
+
+.suggestion-expr {
+  font-family: ui-monospace, "Cascadia Code", "Consolas", monospace;
+  font-size: 13px;
+  color: #ffaeae;
+  word-break: break-word;
+}
+
+.suggestion-reason {
+  font-size: 12px;
+  color: #c8c8d0;
+  line-height: 1.4;
+}
+
+.suggestion-meta {
+  font-size: 11px;
+  color: #6c6c74;
+  margin-top: 2px;
+  font-variant-numeric: tabular-nums;
+}
+
+.loading {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  height: 100vh;
+  color: #6c6c74;
+  font-size: 13px;
+  background: #1c1c1f;
+}
+
+/* === Form view === */
+
+.form-body {
+  flex: 1;
+  overflow-y: auto;
+  padding: 12px 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  scrollbar-width: thin;
+  scrollbar-color: #3a3a45 transparent;
+}
+
+.form-body::-webkit-scrollbar {
+  width: 6px;
+}
+
+.form-body::-webkit-scrollbar-thumb {
+  background: #3a3a45;
+  border-radius: 3px;
+}
+
+.form-field {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.form-field label {
+  font-size: 11px;
+  font-weight: 500;
+  color: #a8a8b0;
+  display: flex;
+  align-items: center;
+  gap: 5px;
+}
+
+.field-required {
+  color: #ff7b7b;
+  font-weight: 600;
+}
+
+.field-optional {
+  font-size: 10px;
+  font-weight: 400;
+  color: #5a5a62;
+  background: #2a2a30;
+  padding: 1px 5px;
+  border-radius: 8px;
+}
+
+.form-field input,
+.form-field select,
+.form-field textarea {
+  background: #232328;
+  color: #e8e8ec;
+  border: 1px solid #2c2c30;
+  border-radius: 6px;
+  padding: 7px 10px;
+  font-size: 12.5px;
+  font-family: inherit;
+  line-height: 1.5;
+  outline: none;
+  transition: border-color 0.15s ease;
+  width: 100%;
+  box-sizing: border-box;
+}
+
+.form-field input:focus,
+.form-field select:focus,
+.form-field textarea:focus {
+  border-color: #5b6cff;
+}
+
+.form-field input:disabled,
+.form-field select:disabled,
+.form-field textarea:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+
+.form-field textarea {
+  resize: none;
+}
+
+.form-field textarea.monospace {
+  font-family: ui-monospace, "Cascadia Code", "Consolas", monospace;
+  font-size: 12px;
+}
+
+.form-field select {
+  cursor: pointer;
+  appearance: auto;
+}
+
+.form-row-2 {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px;
+}
+
+/* === Form footer === */
+
+.form-footer {
+  display: flex;
+  gap: 8px;
+  justify-content: flex-end;
+  padding: 10px 14px;
+  border-top: 1px solid #2c2c30;
+  background: #232328;
+}
+
+.btn-primary {
+  background: #5b6cff;
+  color: white;
+  border: none;
+  border-radius: 6px;
+  padding: 8px 18px;
+  font-size: 13px;
+  font-weight: 500;
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.btn-primary:hover:not(:disabled) {
+  background: #4c5cf0;
+}
+
+.btn-primary:disabled {
+  background: #3a3a45;
+  color: #6c6c74;
+  cursor: not-allowed;
+}
+
+.btn-secondary {
+  background: transparent;
+  color: #a8a8b0;
+  border: 1px solid #3a3a45;
+  border-radius: 6px;
+  padding: 8px 14px;
+  font-size: 13px;
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.btn-secondary:hover:not(:disabled) {
+  background: #2c2c30;
+  color: #e8e8ec;
+}
+
+.btn-secondary:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+/* === Result view === */
+
+.result-body {
+  flex: 1;
+  overflow-y: auto;
+  padding: 14px;
+  scrollbar-width: thin;
+  scrollbar-color: #3a3a45 transparent;
+}
+
+.result-body::-webkit-scrollbar {
+  width: 6px;
+}
+
+.result-body::-webkit-scrollbar-thumb {
+  background: #3a3a45;
+  border-radius: 3px;
+}
+
+.result-waiting {
+  color: #6c6c74;
+  font-size: 13px;
+  padding: 24px 0;
+  text-align: center;
+}
+
+.result-dots::after {
+  content: "";
+  display: inline-block;
+  animation: dots 1.2s steps(3, end) infinite;
+  width: 1.5em;
+  text-align: left;
+}
+
+@keyframes dots {
+  0%   { content: ""; }
+  33%  { content: "."; }
+  66%  { content: ".."; }
+  100% { content: "..."; }
+}
+
+.result-output {
+  margin: 0;
+  white-space: pre-wrap;
+  word-wrap: break-word;
+  font-family: inherit;
+  font-size: 13px;
+  line-height: 1.6;
+  color: #e8e8ec;
+}
+
+.devolutiva-header {
+  display: block;
+  font-weight: 600;
+  font-size: 12px;
+  letter-spacing: 0.03em;
+  color: #7c9cbf;
+  margin-top: 18px;
+  margin-bottom: 0;
+}
+
+.devolutiva-header:first-child {
+  margin-top: 0;
+}
+
+/* === Learning panel: tabs (evitar.md / estilo.md) === */
+
+.tabs {
+  display: flex;
+  gap: 2px;
+  background: #18181b;
+  border: 1px solid #2c2c30;
+  border-radius: 6px;
+  padding: 3px;
+  margin-bottom: 4px;
+}
+
+.tab {
+  flex: 1;
+  background: transparent;
+  color: #8a8a92;
+  border: none;
+  border-radius: 4px;
+  padding: 7px 10px;
+  font-size: 12px;
+  cursor: pointer;
+  transition: background 0.12s ease, color 0.12s ease;
+  font-weight: 500;
+}
+
+.tab:hover:not(.active) {
+  background: #232328;
+  color: #c8c8d0;
+}
+
+.tab.active {
+  background: #2a2a45;
+  color: #b8d4f0;
+}
+
+/* Textarea da proposta de estilo.md (#19) — bem alto para o usuário ver o documento todo */
+.style-proposal-textarea {
+  width: 100%;
+  min-height: 50vh;
+  background: #18181b;
+  color: #e8e8ec;
+  border: 1px solid #2c2c30;
+  border-radius: 6px;
+  padding: 12px 14px;
+  font-family: ui-monospace, "Cascadia Code", "Consolas", monospace;
+  font-size: 12.5px;
+  line-height: 1.55;
+  resize: vertical;
+  outline: none;
+  white-space: pre-wrap;
+}
+
+.style-proposal-textarea:focus {
+  border-color: #5b6cff;
+}
+
+.style-proposal-textarea:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+
+/* Seções da CamposTab (#20) — release + lista de caminhos */
+.campos-section {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-top: 8px;
+}
+
+.campos-section-title {
+  margin: 0;
+  font-size: 12px;
+  font-weight: 600;
+  color: #a8a8b0;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+/* Toggle horizontal (Settings: autostart) — checkbox à direita, label à esquerda */
+.toggle-row {
+  display: flex !important;
+  flex-direction: row !important;
+  align-items: flex-start !important;
+  justify-content: space-between !important;
+  gap: 16px !important;
+  cursor: pointer;
+}
+
+.toggle-row input[type="checkbox"] {
+  margin-top: 4px;
+  width: 18px;
+  height: 18px;
+  accent-color: #5b6cff;
+  cursor: pointer;
+  flex-shrink: 0;
+}
+
+.toggle-row input[type="checkbox"]:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
