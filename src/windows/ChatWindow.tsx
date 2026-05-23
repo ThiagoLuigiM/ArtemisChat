@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef, useCallback } from "react";
+import { useState, useEffect, useRef, useCallback, useMemo } from "react";
 import type React from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
@@ -55,6 +55,65 @@ interface PhraseTemplate {
   situation: string;
   template: string;
   occurrences: number;
+}
+
+interface CartilhaTokenEvent {
+  content: string;
+}
+
+interface CartilhaImage {
+  /** Bytes da imagem (Uint8Array → Tauri serializa como Vec<u8> sem precisar base64) */
+  bytes: number[];
+  /** Extensão sem ponto, ex: "png", "jpg" */
+  extension: string;
+  /** Legenda escrita pelo dev */
+  caption: string;
+  /** Apenas para preview no React (data URL) — NÃO enviado ao backend */
+  previewUrl: string;
+}
+
+interface TestScenariosSuggestion {
+  happy_path: string;
+  edge_cases: string;
+  negative_cases: string;
+  acceptance_criteria: string;
+  regression_areas: string;
+  risks: string;
+}
+
+/** Palavras-chave que indicam mudança de fluxo/UI — quando o campo "O que foi alterado"
+ *  contém qualquer uma, a cartilha exige imagens. */
+const FLOW_KEYWORDS = [
+  "novo fluxo",
+  "nova tela",
+  "novo botão",
+  "novo botao",
+  "nova aba",
+  "nova permissão",
+  "nova permissao",
+  "novo menu",
+  "novo cadastro",
+  "nova rota",
+  "nova navegação",
+  "nova navegacao",
+  "mudança de fluxo",
+  "mudanca de fluxo",
+  "mudança de menu",
+  "mudanca de menu",
+  "novo parâmetro",
+  "novo parametro",
+];
+
+function cartilhaImagesRequired(form: FormFields): { required: boolean; reason: string | null } {
+  if (form.parametro.trim()) {
+    return { required: true, reason: "campo 'Novo parâmetro ou permissão' preenchido" };
+  }
+  const text = form.correcao.toLowerCase();
+  const matched = FLOW_KEYWORDS.find((kw) => text.includes(kw));
+  if (matched) {
+    return { required: true, reason: `o campo 'O que foi alterado' menciona '${matched}'` };
+  }
+  return { required: false, reason: null };
 }
 
 // ── Form data ────────────────────────────────────────────────────────────────
@@ -168,11 +227,15 @@ function FormView({
   fields,
   onChange,
   onGenerate,
+  onGenerateCartilha,
+  onGenerateTestes,
   disabled,
 }: {
   fields: FormFields;
   onChange: (f: FormFields) => void;
   onGenerate: () => void;
+  onGenerateCartilha: () => void;
+  onGenerateTestes: () => void;
   disabled: boolean;
 }) {
   const set =
@@ -312,7 +375,7 @@ function FormView({
 
       </div>
 
-      <div className="form-footer">
+      <div className="form-footer form-footer-multi">
         <button
           type="button"
           className="btn-secondary"
@@ -321,14 +384,34 @@ function FormView({
         >
           Limpar
         </button>
-        <button
-          type="button"
-          className="btn-primary"
-          onClick={onGenerate}
-          disabled={disabled || !canGenerate}
-        >
-          {disabled ? "Gerando..." : "Gerar devolutiva"}
-        </button>
+        <div className="form-footer-right">
+          <button
+            type="button"
+            className="btn-secondary"
+            onClick={onGenerateCartilha}
+            disabled={disabled || !canGenerate}
+            title="Gera uma cartilha HTML didática a partir desse input (com imagens, se aplicável)"
+          >
+            Cartilha
+          </button>
+          <button
+            type="button"
+            className="btn-secondary"
+            onClick={onGenerateTestes}
+            disabled={disabled || !canGenerate}
+            title="Monta um formulário estruturado para a equipe de testes/QA"
+          >
+            Form de testes
+          </button>
+          <button
+            type="button"
+            className="btn-primary"
+            onClick={onGenerate}
+            disabled={disabled || !canGenerate}
+          >
+            {disabled ? "Gerando..." : "Devolutiva (N1)"}
+          </button>
+        </div>
       </div>
     </>
   );
@@ -1530,6 +1613,672 @@ function FrasesTab({ vaultPath }: { vaultPath: string | null }) {
   );
 }
 
+// ── CartilhaView ──────────────────────────────────────────────────────────────
+// Geração de cartilha HTML: dev complementa título + audience + imagens,
+// streaming da IA gera o corpo didático, dev edita e salva no vault.
+
+const AUDIENCE_LABELS: Record<string, string> = {
+  suporte: "Time de Suporte (N1)",
+  cliente: "Usuário final do cliente",
+  interno: "Equipe interna",
+};
+
+function bytesFromFile(file: File): Promise<Uint8Array> {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => {
+      const buf = reader.result as ArrayBuffer;
+      resolve(new Uint8Array(buf));
+    };
+    reader.onerror = () => reject(reader.error);
+    reader.readAsArrayBuffer(file);
+  });
+}
+
+function previewUrlFromFile(file: File): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(reader.result as string);
+    reader.onerror = () => reject(reader.error);
+    reader.readAsDataURL(file);
+  });
+}
+
+function extensionFromMime(mime: string): string {
+  if (mime === "image/jpeg") return "jpg";
+  if (mime === "image/png") return "png";
+  if (mime === "image/webp") return "webp";
+  if (mime === "image/gif") return "gif";
+  if (mime === "image/bmp") return "bmp";
+  return "png"; // default seguro
+}
+
+async function fileToCartilhaImage(file: File): Promise<CartilhaImage> {
+  const [bytes, preview] = await Promise.all([bytesFromFile(file), previewUrlFromFile(file)]);
+  return {
+    bytes: Array.from(bytes),
+    extension: extensionFromMime(file.type),
+    caption: "",
+    previewUrl: preview,
+  };
+}
+
+function CartilhaView({
+  form,
+  release,
+  onCancel,
+  onSaved,
+}: {
+  form: FormFields;
+  release: string;
+  onCancel: () => void;
+  onSaved: (path: string) => void;
+}) {
+  const formInput = useMemo(() => compileForm(form), [form]);
+  const imagesGuard = useMemo(() => cartilhaImagesRequired(form), [form]);
+
+  const [titulo, setTitulo] = useState(() => {
+    const first = form.correcao.split("\n")[0]?.trim() ?? "";
+    return first.length > 80 ? first.slice(0, 80).trimEnd() : first;
+  });
+  const [autor, setAutor] = useState("");
+  const [audience, setAudience] = useState<"suporte" | "cliente" | "interno">("suporte");
+  const [images, setImages] = useState<CartilhaImage[]>([]);
+  const [dragOver, setDragOver] = useState(false);
+
+  const [aiContent, setAiContent] = useState("");
+  const [streaming, setStreaming] = useState(false);
+  const [editedContent, setEditedContent] = useState("");
+  const [streamingDone, setStreamingDone] = useState(false);
+
+  const [saving, setSaving] = useState(false);
+  const [savedPath, setSavedPath] = useState<string | null>(null);
+  const [error, setError] = useState<string | null>(null);
+
+  const aiRef = useRef("");
+  const fileInputRef = useRef<HTMLInputElement>(null);
+
+  // Listen tokens de streaming
+  useEffect(() => {
+    let active = true;
+    const ul: UnlistenFn[] = [];
+    Promise.all([
+      listen<CartilhaTokenEvent>("cartilha-token", (e) => {
+        aiRef.current += e.payload.content;
+        setAiContent(aiRef.current);
+      }),
+      listen("cartilha-done", () => {
+        setStreaming(false);
+        setStreamingDone(true);
+        setEditedContent(aiRef.current);
+      }),
+    ]).then((uls) => {
+      if (!active) { uls.forEach((u) => u()); return; }
+      ul.push(...uls);
+    });
+    return () => { active = false; ul.forEach((u) => u()); };
+  }, []);
+
+  // Listen paste de imagem (Ctrl+V em qualquer lugar do CartilhaView)
+  useEffect(() => {
+    const onPaste = async (e: ClipboardEvent) => {
+      const items = e.clipboardData?.items;
+      if (!items) return;
+      const incoming: File[] = [];
+      for (let i = 0; i < items.length; i++) {
+        const item = items[i];
+        if (item.kind === "file" && item.type.startsWith("image/")) {
+          const f = item.getAsFile();
+          if (f) incoming.push(f);
+        }
+      }
+      if (incoming.length > 0) {
+        e.preventDefault();
+        const newImgs = await Promise.all(incoming.map(fileToCartilhaImage));
+        setImages((prev) => [...prev, ...newImgs]);
+      }
+    };
+    document.addEventListener("paste", onPaste);
+    return () => document.removeEventListener("paste", onPaste);
+  }, []);
+
+  const handleFilePick = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const files = Array.from(e.target.files ?? []).filter((f) => f.type.startsWith("image/"));
+    if (files.length === 0) return;
+    const newImgs = await Promise.all(files.map(fileToCartilhaImage));
+    setImages((prev) => [...prev, ...newImgs]);
+    if (fileInputRef.current) fileInputRef.current.value = "";
+  };
+
+  const handleDrop = async (e: React.DragEvent) => {
+    e.preventDefault();
+    setDragOver(false);
+    const files = Array.from(e.dataTransfer.files).filter((f) => f.type.startsWith("image/"));
+    if (files.length === 0) return;
+    const newImgs = await Promise.all(files.map(fileToCartilhaImage));
+    setImages((prev) => [...prev, ...newImgs]);
+  };
+
+  const updateCaption = (idx: number, caption: string) => {
+    setImages((prev) => prev.map((img, i) => (i === idx ? { ...img, caption } : img)));
+  };
+
+  const removeImage = (idx: number) => {
+    setImages((prev) => prev.filter((_, i) => i !== idx));
+  };
+
+  const canGenerate =
+    !!titulo.trim() &&
+    !streaming &&
+    !streamingDone &&
+    (!imagesGuard.required || images.length > 0);
+
+  const handleGenerate = async () => {
+    setError(null);
+    aiRef.current = "";
+    setAiContent("");
+    setEditedContent("");
+    setStreamingDone(false);
+    setStreaming(true);
+    try {
+      await invoke("stream_cartilha", {
+        formInput,
+        audience,
+        imageCaptions: images.map((img) => img.caption || "(sem legenda)"),
+      });
+    } catch (e) {
+      setError(`Erro ao gerar: ${String(e)}`);
+      setStreaming(false);
+    }
+  };
+
+  const handleSave = async () => {
+    if (!editedContent.trim()) return;
+    setSaving(true);
+    setError(null);
+    try {
+      const path = await invoke<string>("save_cartilha", {
+        title: titulo.trim(),
+        content: editedContent,
+        release: release.trim() || null,
+        author: autor.trim() || null,
+        images: images.map(({ bytes, extension, caption }) => ({ bytes, extension, caption })),
+      });
+      setSavedPath(path);
+      onSaved(path);
+    } catch (e) {
+      setError(`Erro ao salvar: ${String(e)}`);
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const handleOpen = async () => {
+    if (!savedPath) return;
+    try {
+      await invoke("open_in_system", { path: savedPath });
+    } catch (e) {
+      setError(`Erro ao abrir: ${String(e)}`);
+    }
+  };
+
+  return (
+    <div className="cartilha-view">
+      <header className="cartilha-header">
+        <h2>Cartilha HTML</h2>
+        <button className="secondary close" onClick={onCancel} aria-label="Voltar">✕</button>
+      </header>
+
+      {savedPath ? (
+        <div className="cartilha-success">
+          <p className="vault-message">
+            ✓ Cartilha salva em <code>{savedPath}</code>
+          </p>
+          <div className="row">
+            <button type="button" className="btn-secondary" onClick={onCancel}>
+              Nova devolutiva
+            </button>
+            <button type="button" onClick={handleOpen}>
+              Abrir no navegador
+            </button>
+          </div>
+        </div>
+      ) : (
+        <>
+          <div className="cartilha-meta">
+            <div className="form-field">
+              <label>Título da cartilha</label>
+              <input
+                type="text"
+                value={titulo}
+                onChange={(e) => setTitulo(e.target.value)}
+                placeholder="Ex: Nova permissão de cadastro de produto"
+                disabled={streaming || saving}
+              />
+            </div>
+            <div className="form-row-2">
+              <div className="form-field">
+                <label>Autor <span className="field-optional">opcional</span></label>
+                <input
+                  type="text"
+                  value={autor}
+                  onChange={(e) => setAutor(e.target.value)}
+                  placeholder="Seu nome"
+                  disabled={streaming || saving}
+                />
+              </div>
+              <div className="form-field">
+                <label>Público alvo</label>
+                <select
+                  value={audience}
+                  onChange={(e) => setAudience(e.target.value as "suporte" | "cliente" | "interno")}
+                  disabled={streaming || saving}
+                >
+                  <option value="suporte">{AUDIENCE_LABELS.suporte}</option>
+                  <option value="cliente">{AUDIENCE_LABELS.cliente}</option>
+                  <option value="interno">{AUDIENCE_LABELS.interno}</option>
+                </select>
+              </div>
+            </div>
+          </div>
+
+          <div className="cartilha-images-section">
+            <div className="cartilha-images-header">
+              <span className="label">
+                Imagens
+                {imagesGuard.required && (
+                  <span className="field-required" title={imagesGuard.reason ?? ""}> obrigatórias</span>
+                )}
+              </span>
+              <span className="counter">{images.length} anexada(s)</span>
+            </div>
+            {imagesGuard.required && images.length === 0 && (
+              <p className="key-error">
+                ⚠ Imagens obrigatórias porque {imagesGuard.reason}.
+              </p>
+            )}
+            <p className="help" style={{ marginTop: 4 }}>
+              Cole (<code>Ctrl+V</code>), arraste arquivos aqui ou clique no botão. PNG, JPG, WEBP, GIF, BMP.
+            </p>
+            <div
+              className={`cartilha-dropzone ${dragOver ? "drag-over" : ""}`}
+              onDragOver={(e) => { e.preventDefault(); setDragOver(true); }}
+              onDragLeave={() => setDragOver(false)}
+              onDrop={handleDrop}
+            >
+              {images.length === 0 ? (
+                <span className="dropzone-empty">Solte imagens aqui ou cole com Ctrl+V</span>
+              ) : (
+                <div className="cartilha-images-grid">
+                  {images.map((img, i) => (
+                    <div key={i} className="cartilha-image-card">
+                      <img src={img.previewUrl} alt={`Imagem ${i + 1}`} />
+                      <input
+                        type="text"
+                        value={img.caption}
+                        onChange={(e) => updateCaption(i, e.target.value)}
+                        placeholder="Legenda da imagem"
+                        disabled={streaming || saving}
+                      />
+                      <button
+                        type="button"
+                        className="btn-danger"
+                        onClick={() => removeImage(i)}
+                        disabled={streaming || saving}
+                      >
+                        Remover
+                      </button>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+            <input
+              ref={fileInputRef}
+              type="file"
+              accept="image/*"
+              multiple
+              style={{ display: "none" }}
+              onChange={handleFilePick}
+            />
+            <div className="row">
+              <button
+                type="button"
+                className="btn-secondary"
+                onClick={() => fileInputRef.current?.click()}
+                disabled={streaming || saving}
+              >
+                Anexar arquivo...
+              </button>
+            </div>
+          </div>
+
+          <div className="cartilha-content-section">
+            {!streamingDone && !streaming && (
+              <div className="row">
+                <button
+                  type="button"
+                  onClick={handleGenerate}
+                  disabled={!canGenerate}
+                  title="A IA escreve o conteúdo a partir do input do formulário"
+                >
+                  Gerar conteúdo
+                </button>
+              </div>
+            )}
+            {streaming && (
+              <div className="result-waiting">
+                Gerando cartilha<span className="result-dots" />
+              </div>
+            )}
+            {streaming && aiContent && (
+              <pre className="cartilha-streaming">{aiContent}</pre>
+            )}
+            {streamingDone && (
+              <>
+                <p className="help">
+                  Revise e edite antes de salvar. Use <code>[s]Título :[/s]</code> para
+                  marcar novas seções (vira <code>&lt;h2&gt;</code> no HTML).
+                </p>
+                <textarea
+                  className="cartilha-editor"
+                  value={editedContent}
+                  onChange={(e) => setEditedContent(e.target.value)}
+                  disabled={saving}
+                  spellCheck
+                />
+                <div className="row">
+                  <button
+                    type="button"
+                    className="btn-secondary"
+                    onClick={() => {
+                      aiRef.current = "";
+                      setAiContent("");
+                      setEditedContent("");
+                      setStreamingDone(false);
+                    }}
+                    disabled={saving}
+                  >
+                    Gerar novamente
+                  </button>
+                  <button
+                    type="button"
+                    onClick={handleSave}
+                    disabled={saving || !editedContent.trim()}
+                  >
+                    {saving ? "Salvando..." : "Salvar no vault"}
+                  </button>
+                </div>
+              </>
+            )}
+          </div>
+        </>
+      )}
+
+      {error && <p className="key-error">{error}</p>}
+    </div>
+  );
+}
+
+// ── TestesView ────────────────────────────────────────────────────────────────
+// Form complementar pro QA: dev preenche 6 seções (algumas pré-preenchidas do
+// FormView), opcionalmente pede sugestões da IA, e clica "Gerar e copiar" pra
+// receber texto estruturado pronto pro ticket de QA.
+
+interface TestesFields {
+  ticket: string;
+  dataEntrega: string;
+  tipo: string;
+  ambiente: string;
+  scripts: string;
+  parametros: string;
+  dadosTeste: string;
+  happyPath: string;
+  edgeCases: string;
+  negativeCases: string;
+  acceptanceCriteria: string;
+  regressionAreas: string;
+  risks: string;
+}
+
+function TestesView({
+  form,
+  release,
+  onCancel,
+  onCopied,
+}: {
+  form: FormFields;
+  release: string;
+  onCancel: () => void;
+  onCopied: () => void;
+}) {
+  const formInput = useMemo(() => compileForm(form), [form]);
+
+  const [fields, setFields] = useState<TestesFields>(() => ({
+    ticket: "",
+    dataEntrega: new Date().toISOString().slice(0, 10),
+    tipo: "correcao",
+    ambiente: "homologacao",
+    scripts: form.scripts,
+    parametros: form.parametro,
+    dadosTeste: "",
+    happyPath: form.validacao,
+    edgeCases: "",
+    negativeCases: "",
+    acceptanceCriteria: "",
+    regressionAreas: "",
+    risks: form.cenario,
+  }));
+
+  const [suggesting, setSuggesting] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [copied, setCopied] = useState(false);
+
+  const set = <K extends keyof TestesFields>(key: K) =>
+    (e: React.ChangeEvent<HTMLInputElement | HTMLTextAreaElement | HTMLSelectElement>) =>
+      setFields((prev) => ({ ...prev, [key]: e.target.value }));
+
+  const handleSuggest = async () => {
+    setSuggesting(true);
+    setError(null);
+    try {
+      const sug = await invoke<TestScenariosSuggestion>("suggest_test_scenarios", { formInput });
+      setFields((prev) => ({
+        ...prev,
+        happyPath: sug.happy_path || prev.happyPath,
+        edgeCases: sug.edge_cases || prev.edgeCases,
+        negativeCases: sug.negative_cases || prev.negativeCases,
+        acceptanceCriteria: sug.acceptance_criteria || prev.acceptanceCriteria,
+        regressionAreas: sug.regression_areas || prev.regressionAreas,
+        risks: sug.risks || prev.risks,
+      }));
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setSuggesting(false);
+    }
+  };
+
+  const tipoLabels: Record<string, string> = {
+    correcao: "Correção",
+    feature: "Nova feature",
+    melhoria: "Melhoria",
+  };
+  const ambienteLabels: Record<string, string> = {
+    homologacao: "Homologação",
+    espelho: "Produção espelho",
+    dev: "Desenvolvimento",
+  };
+
+  const compileTestesText = (): string => {
+    const parts: string[] = [];
+    const section = (title: string, body: string) => {
+      if (body.trim()) parts.push(`[n]${title} :[/n]\n\n${body.trim()}`);
+    };
+    const line = (label: string, value: string) => (value.trim() ? `${label}: ${value.trim()}` : null);
+
+    const idLines = [
+      line("Ticket", fields.ticket),
+      line("Release", release),
+      line("Data de entrega para teste", fields.dataEntrega),
+      line("Tipo", tipoLabels[fields.tipo] ?? fields.tipo),
+    ].filter(Boolean) as string[];
+    if (idLines.length > 0) parts.push(`[n]Identificação :[/n]\n\n${idLines.join("\n")}`);
+
+    section("Contexto", form.correcao);
+
+    const preReqLines: string[] = [];
+    if (fields.ambiente.trim()) preReqLines.push(`Ambiente: ${ambienteLabels[fields.ambiente] ?? fields.ambiente}`);
+    if (fields.scripts.trim()) preReqLines.push(`Scripts a rodar antes:\n\`\`\`sql\n${fields.scripts.trim()}\n\`\`\``);
+    if (fields.parametros.trim()) preReqLines.push(`Parâmetros a setar:\n${fields.parametros.trim()}`);
+    if (fields.dadosTeste.trim()) preReqLines.push(`Dados de teste:\n${fields.dadosTeste.trim()}`);
+    if (preReqLines.length > 0) parts.push(`[n]Pré-requisitos :[/n]\n\n${preReqLines.join("\n\n")}`);
+
+    const cenarioLines: string[] = [];
+    if (fields.happyPath.trim()) cenarioLines.push(`Caminho feliz:\n${fields.happyPath.trim()}`);
+    if (fields.edgeCases.trim()) cenarioLines.push(`Cenários edge:\n${fields.edgeCases.trim()}`);
+    if (fields.negativeCases.trim()) cenarioLines.push(`Cenários negativos:\n${fields.negativeCases.trim()}`);
+    if (fields.acceptanceCriteria.trim()) cenarioLines.push(`Critérios de aceitação:\n${fields.acceptanceCriteria.trim()}`);
+    if (cenarioLines.length > 0) parts.push(`[n]Cenários :[/n]\n\n${cenarioLines.join("\n\n")}`);
+
+    section("Regressão", fields.regressionAreas);
+    section("Riscos e observações", fields.risks);
+
+    return parts.join("\n\n");
+  };
+
+  const handleCopy = async () => {
+    const text = compileTestesText();
+    if (!text.trim()) {
+      setError("Preencha ao menos uma seção antes de copiar.");
+      return;
+    }
+    setError(null);
+    try {
+      await navigator.clipboard.writeText(text);
+      setCopied(true);
+      onCopied();
+      setTimeout(() => setCopied(false), 2500);
+    } catch (e) {
+      setError(`Erro ao copiar: ${String(e)}`);
+    }
+  };
+
+  return (
+    <div className="testes-view">
+      <header className="cartilha-header">
+        <h2>Form de testes (QA)</h2>
+        <button className="secondary close" onClick={onCancel} aria-label="Voltar">✕</button>
+      </header>
+
+      <p className="help">
+        Campos pré-preenchidos vêm do formulário principal. Clique em "Sugerir cenários" para a IA propor cenários, edge cases e regressão a partir do contexto.
+      </p>
+
+      <div className="testes-form">
+        <h3 className="testes-section-title">1. Identificação</h3>
+        <div className="form-row-2">
+          <div className="form-field">
+            <label>Ticket / chamado</label>
+            <input type="text" value={fields.ticket} onChange={set("ticket")} placeholder="ART-1234" />
+          </div>
+          <div className="form-field">
+            <label>Data de entrega para teste</label>
+            <input type="date" value={fields.dataEntrega} onChange={set("dataEntrega")} />
+          </div>
+        </div>
+        <div className="form-field">
+          <label>Tipo</label>
+          <select value={fields.tipo} onChange={set("tipo")}>
+            <option value="correcao">Correção</option>
+            <option value="feature">Nova feature</option>
+            <option value="melhoria">Melhoria</option>
+          </select>
+        </div>
+
+        <h3 className="testes-section-title">2. Pré-requisitos</h3>
+        <div className="form-field">
+          <label>Ambiente</label>
+          <select value={fields.ambiente} onChange={set("ambiente")}>
+            <option value="homologacao">Homologação</option>
+            <option value="espelho">Produção espelho</option>
+            <option value="dev">Desenvolvimento</option>
+          </select>
+        </div>
+        <div className="form-field">
+          <label>Scripts a rodar antes <span className="field-optional">prefill</span></label>
+          <textarea rows={3} value={fields.scripts} onChange={set("scripts")} className="monospace" />
+        </div>
+        <div className="form-field">
+          <label>Parâmetros a setar <span className="field-optional">prefill</span></label>
+          <textarea rows={2} value={fields.parametros} onChange={set("parametros")} />
+        </div>
+        <div className="form-field">
+          <label>Dados de teste <span className="field-optional">opcional</span></label>
+          <textarea
+            rows={2}
+            value={fields.dadosTeste}
+            onChange={set("dadosTeste")}
+            placeholder="Usuário, empresa, valores, casos específicos..."
+          />
+        </div>
+
+        <h3 className="testes-section-title">
+          3. Cenários
+          <button
+            type="button"
+            className="btn-secondary suggest-ai"
+            onClick={handleSuggest}
+            disabled={suggesting}
+            title="A IA preenche cenários, regressão e riscos a partir do contexto"
+          >
+            {suggesting ? "Sugerindo..." : "Sugerir com IA"}
+          </button>
+        </h3>
+        <div className="form-field">
+          <label>Caminho feliz</label>
+          <textarea rows={3} value={fields.happyPath} onChange={set("happyPath")} />
+        </div>
+        <div className="form-field">
+          <label>Cenários edge (limites, valores extremos)</label>
+          <textarea rows={3} value={fields.edgeCases} onChange={set("edgeCases")} />
+        </div>
+        <div className="form-field">
+          <label>Cenários negativos (que devem bloquear)</label>
+          <textarea rows={3} value={fields.negativeCases} onChange={set("negativeCases")} />
+        </div>
+        <div className="form-field">
+          <label>Critérios de aceitação</label>
+          <textarea rows={3} value={fields.acceptanceCriteria} onChange={set("acceptanceCriteria")} />
+        </div>
+
+        <h3 className="testes-section-title">4. Regressão</h3>
+        <div className="form-field">
+          <label>Áreas afetadas que devem ser revalidadas</label>
+          <textarea rows={3} value={fields.regressionAreas} onChange={set("regressionAreas")} />
+        </div>
+
+        <h3 className="testes-section-title">5. Riscos e observações</h3>
+        <div className="form-field">
+          <label>Limitações conhecidas, cenários não simulados</label>
+          <textarea rows={3} value={fields.risks} onChange={set("risks")} />
+        </div>
+      </div>
+
+      {error && <p className="key-error">{error}</p>}
+
+      <div className="form-footer form-footer-multi">
+        <button type="button" className="btn-secondary" onClick={onCancel}>
+          Voltar
+        </button>
+        <button type="button" onClick={handleCopy} disabled={suggesting}>
+          {copied ? "✓ Copiado!" : "Gerar e copiar"}
+        </button>
+      </div>
+    </div>
+  );
+}
+
 // ── ChatWindow (main) ─────────────────────────────────────────────────────────
 
 export default function ChatWindow() {
@@ -1539,7 +2288,7 @@ export default function ChatWindow() {
   const [showLearning, setShowLearning] = useState(false);
   const [vaultStatus, setVaultStatus] = useState<VaultStatus | null>(null);
 
-  const [view, setView] = useState<"form" | "result">("form");
+  const [view, setView] = useState<"form" | "result" | "cartilha" | "testes">("form");
   const [form, setForm] = useState<FormFields>(EMPTY_FORM);
   const [result, setResult] = useState("");
   const [streaming, setStreaming] = useState(false);
@@ -1719,14 +2468,17 @@ export default function ChatWindow() {
         </div>
       </header>
 
-      {view === "form" ? (
+      {view === "form" && (
         <FormView
           fields={form}
           onChange={setForm}
           onGenerate={handleGenerate}
+          onGenerateCartilha={() => setView("cartilha")}
+          onGenerateTestes={() => setView("testes")}
           disabled={streaming}
         />
-      ) : (
+      )}
+      {view === "result" && (
         <ResultView
           aiRawOutput={result}
           streaming={streaming}
@@ -1734,6 +2486,22 @@ export default function ChatWindow() {
           onNew={handleNewDevolutiva}
           onApprove={handleApprove}
           onDiscard={handleDiscard}
+        />
+      )}
+      {view === "cartilha" && (
+        <CartilhaView
+          form={form}
+          release={form.release}
+          onCancel={() => setView("form")}
+          onSaved={() => { /* mantém na tela de sucesso até usuário voltar */ }}
+        />
+      )}
+      {view === "testes" && (
+        <TestesView
+          form={form}
+          release={form.release}
+          onCancel={() => setView("form")}
+          onCopied={() => { /* toast já está dentro do componente */ }}
         />
       )}
     </div>

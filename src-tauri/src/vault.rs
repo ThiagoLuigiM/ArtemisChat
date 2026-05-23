@@ -539,6 +539,329 @@ fn insert_into_phrases_section(content: &str, block: &str) -> String {
     }
 }
 
+/// Imagem da cartilha — bytes brutos + extensão (sem ponto) + legenda.
+/// A extensão é determinada no frontend pelo mime-type da imagem
+/// (image/png → "png", image/jpeg → "jpg", etc.).
+pub struct CartilhaImageInput<'a> {
+    pub bytes: &'a [u8],
+    pub extension: &'a str,
+    pub caption: &'a str,
+}
+
+/// Cria a pasta `vault/cartilhas/YYYY-MM-DD-<slug>/` com:
+/// - `imagens/01.<ext>`, `imagens/02.<ext>`, ... (preserva ordem do dev)
+/// - `index.html` self-contained (CSS inline; sem dependências externas)
+///
+/// Retorna o caminho completo do `index.html` gerado.
+pub fn save_cartilha(
+    vault_path: &Path,
+    title: &str,
+    content: &str,
+    release: Option<&str>,
+    author: Option<&str>,
+    images: &[CartilhaImageInput],
+) -> anyhow::Result<PathBuf> {
+    if title.trim().is_empty() {
+        anyhow::bail!("título da cartilha está vazio");
+    }
+    if content.trim().is_empty() {
+        anyhow::bail!("conteúdo da cartilha está vazio");
+    }
+
+    let date = chrono::Local::now().format("%Y-%m-%d").to_string();
+    let slug = slug_from_title(title);
+    let cartilha_dir = vault_path.join("cartilhas").join(format!("{}-{}", date, slug));
+    let imagens_dir = cartilha_dir.join("imagens");
+    fs::create_dir_all(&imagens_dir)?;
+
+    // Salva cada imagem como NN.ext (zero-padded a 2 dígitos)
+    let mut image_files: Vec<(String, String)> = Vec::with_capacity(images.len());
+    for (i, img) in images.iter().enumerate() {
+        let filename = format!("{:02}.{}", i + 1, sanitize_extension(img.extension));
+        let path = imagens_dir.join(&filename);
+        fs::write(&path, img.bytes)?;
+        image_files.push((filename, img.caption.to_string()));
+    }
+
+    let date_display = chrono::Local::now().format("%d/%m/%Y").to_string();
+    let html = render_cartilha_html(
+        title,
+        content,
+        release.unwrap_or(""),
+        author.unwrap_or(""),
+        &date_display,
+        &image_files,
+    );
+
+    let index_path = cartilha_dir.join("index.html");
+    fs::write(&index_path, html)?;
+    Ok(index_path)
+}
+
+/// Gera slug ASCII kebab-case a partir do título. Limita a 60 chars pra não estourar
+/// limites de path no Windows (260 chars default).
+fn slug_from_title(title: &str) -> String {
+    let s = crate::deepseek::slugify_category(title);
+    if s.len() > 60 {
+        s[..60].trim_end_matches('-').to_string()
+    } else {
+        s
+    }
+}
+
+/// Limita extensão a [a-z0-9]+ (rejeita lixo como `../../evil`). Default `png`.
+fn sanitize_extension(ext: &str) -> String {
+    let cleaned: String = ext
+        .to_lowercase()
+        .chars()
+        .filter(|c| c.is_ascii_lowercase() || c.is_ascii_digit())
+        .take(5)
+        .collect();
+    if cleaned.is_empty() {
+        "png".to_string()
+    } else {
+        cleaned
+    }
+}
+
+/// Escape mínimo de HTML pra evitar quebrar o template com `<`, `>`, `&`.
+/// Usado em todos os campos de texto livre que vão pro HTML.
+fn html_escape(s: &str) -> String {
+    s.replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('"', "&quot;")
+}
+
+/// Renderiza o HTML self-contained da cartilha. CSS inline, nenhum link externo,
+/// imagens via path relativo `imagens/NN.ext`. Funciona aberto no browser ou
+/// indexado pelo Obsidian via plugin de HTML embed.
+fn render_cartilha_html(
+    title: &str,
+    content: &str,
+    release: &str,
+    author: &str,
+    date_display: &str,
+    image_files: &[(String, String)],
+) -> String {
+    // Converte tags [s]Título :[/s] em <h2>; quebras duplas em </p><p>; texto cru em <p>.
+    let body_html = content_to_html(content);
+
+    let mut gallery = String::new();
+    if !image_files.is_empty() {
+        gallery.push_str("\n  <section class=\"gallery\">\n    <h2>Imagens de referência</h2>\n");
+        for (filename, caption) in image_files {
+            gallery.push_str(&format!(
+                "    <figure>\n      <img src=\"imagens/{}\" alt=\"{}\" loading=\"lazy\">\n      <figcaption>{}</figcaption>\n    </figure>\n",
+                html_escape(filename),
+                html_escape(caption),
+                html_escape(caption)
+            ));
+        }
+        gallery.push_str("  </section>\n");
+    }
+
+    let mut meta_parts: Vec<String> = Vec::new();
+    if !release.trim().is_empty() {
+        meta_parts.push(format!("Release {}", html_escape(release.trim())));
+    }
+    if !date_display.is_empty() {
+        meta_parts.push(html_escape(date_display));
+    }
+    if !author.trim().is_empty() {
+        meta_parts.push(html_escape(author.trim()));
+    }
+    let meta_line = if meta_parts.is_empty() {
+        String::new()
+    } else {
+        format!("    <p class=\"meta\">{}</p>\n", meta_parts.join(" · "))
+    };
+
+    format!(
+        r#"<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{title_esc}</title>
+  <style>
+    :root {{
+      --fg: #1c1c1f;
+      --muted: #6c6c74;
+      --accent: #4848e0;
+      --bg: #ffffff;
+      --bg-alt: #f7f7fa;
+      --border: #e5e5ea;
+    }}
+    * {{ box-sizing: border-box; }}
+    body {{
+      margin: 0;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+      color: var(--fg);
+      background: var(--bg);
+      line-height: 1.6;
+      font-size: 16px;
+    }}
+    main {{
+      max-width: 760px;
+      margin: 0 auto;
+      padding: 32px 24px 64px;
+    }}
+    header {{
+      border-bottom: 1px solid var(--border);
+      padding-bottom: 20px;
+      margin-bottom: 32px;
+    }}
+    header h1 {{
+      margin: 0 0 8px;
+      font-size: 28px;
+      letter-spacing: -0.01em;
+    }}
+    .meta {{
+      margin: 0;
+      color: var(--muted);
+      font-size: 13px;
+    }}
+    h2 {{
+      margin: 32px 0 12px;
+      font-size: 19px;
+      color: var(--accent);
+      letter-spacing: 0.01em;
+    }}
+    p {{ margin: 0 0 14px; }}
+    figure {{
+      margin: 20px 0;
+      padding: 12px;
+      background: var(--bg-alt);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+    }}
+    figure img {{
+      display: block;
+      max-width: 100%;
+      height: auto;
+      border-radius: 4px;
+    }}
+    figcaption {{
+      margin-top: 8px;
+      font-size: 13px;
+      color: var(--muted);
+      text-align: center;
+    }}
+    footer {{
+      margin-top: 48px;
+      padding-top: 16px;
+      border-top: 1px solid var(--border);
+      color: var(--muted);
+      font-size: 12px;
+      text-align: center;
+    }}
+    @media print {{
+      body {{ font-size: 12pt; }}
+      h2 {{ break-after: avoid; }}
+      figure {{ break-inside: avoid; }}
+    }}
+  </style>
+</head>
+<body>
+  <main>
+    <header>
+      <h1>{title_esc}</h1>
+{meta}    </header>
+{body}{gallery}    <footer>Cartilha gerada pelo Artemis em {date_esc}</footer>
+  </main>
+</body>
+</html>
+"#,
+        title_esc = html_escape(title),
+        meta = meta_line,
+        body = body_html,
+        gallery = gallery,
+        date_esc = html_escape(date_display),
+    )
+}
+
+/// Converte o texto bruto da IA em HTML estruturado:
+/// - `[s]Título :[/s]` → `<h2>Título :</h2>` (mesmo padrão do `[n]` da devolutiva,
+///   mas com `s` de "section" pra diferenciar)
+/// - Quebras de linha duplas → novo parágrafo
+/// - Quebras simples dentro de parágrafo → `<br>` (preserva listas/passos)
+fn content_to_html(content: &str) -> String {
+    let mut out = String::with_capacity(content.len() * 2);
+    let mut buf = String::new();
+    let mut in_para = false;
+
+    let flush_para = |buf: &mut String, out: &mut String, in_para: &mut bool| {
+        if *in_para {
+            let text = std::mem::take(buf);
+            let text = text.trim();
+            if !text.is_empty() {
+                let escaped = html_escape(text).replace('\n', "<br>");
+                out.push_str(&format!("    <p>{}</p>\n", escaped));
+            }
+            *in_para = false;
+        }
+    };
+
+    // Tokeniza por [s]...[/s] preservando ordem
+    let pattern = regex_split_sections(content);
+    for chunk in pattern {
+        match chunk {
+            SectionChunk::Heading(h) => {
+                flush_para(&mut buf, &mut out, &mut in_para);
+                out.push_str(&format!("    <h2>{}</h2>\n", html_escape(h.trim())));
+            }
+            SectionChunk::Text(t) => {
+                for paragraph in t.split("\n\n") {
+                    let trimmed = paragraph.trim_matches('\n');
+                    if trimmed.is_empty() {
+                        flush_para(&mut buf, &mut out, &mut in_para);
+                        continue;
+                    }
+                    flush_para(&mut buf, &mut out, &mut in_para);
+                    buf.push_str(trimmed);
+                    in_para = true;
+                    flush_para(&mut buf, &mut out, &mut in_para);
+                }
+            }
+        }
+    }
+    flush_para(&mut buf, &mut out, &mut in_para);
+    out
+}
+
+enum SectionChunk<'a> {
+    Heading(&'a str),
+    Text(&'a str),
+}
+
+/// Split simples baseado em [s]...[/s]. Não é regex de verdade — varredura linear.
+fn regex_split_sections(s: &str) -> Vec<SectionChunk<'_>> {
+    let mut out = Vec::new();
+    let mut cursor = 0;
+    while let Some(start_rel) = s[cursor..].find("[s]") {
+        let start = cursor + start_rel;
+        if start > cursor {
+            out.push(SectionChunk::Text(&s[cursor..start]));
+        }
+        let after_open = start + 3;
+        if let Some(end_rel) = s[after_open..].find("[/s]") {
+            let end = after_open + end_rel;
+            out.push(SectionChunk::Heading(&s[after_open..end]));
+            cursor = end + 4;
+        } else {
+            // [s] sem fechar — trata como texto cru pra não perder conteúdo
+            out.push(SectionChunk::Text(&s[start..]));
+            cursor = s.len();
+            break;
+        }
+    }
+    if cursor < s.len() {
+        out.push(SectionChunk::Text(&s[cursor..]));
+    }
+    out
+}
+
 pub fn seed_vault(target_path: &Path) -> anyhow::Result<Vec<String>> {
     fs::create_dir_all(target_path)?;
 
@@ -789,5 +1112,116 @@ mod tests {
         // Arquivo original intacto, sem backup
         assert_eq!(fs::read_to_string(dir.join("campos-padrao.md")).unwrap(), "conteudo original");
         assert!(!dir.join("campos-padrao.md.bak").exists());
+    }
+
+    #[test]
+    fn save_cartilha_creates_directory_with_images_and_index_html() {
+        let dir = temp_vault();
+        let img_bytes = b"fake png bytes";
+        let images = vec![
+            CartilhaImageInput {
+                bytes: img_bytes,
+                extension: "png",
+                caption: "Tela inicial do menu",
+            },
+            CartilhaImageInput {
+                bytes: img_bytes,
+                extension: "JPG", // será normalizado para lowercase
+                caption: "Detalhe do novo botão",
+            },
+        ];
+        let index = save_cartilha(
+            &dir,
+            "Nova permissão de cadastro de produto",
+            "[s]Objetivo :[/s]\n\nConfigurar o acesso.\n\n[s]Passo a passo :[/s]\n\nAcesse o menu.",
+            Some("v2.55.0 — 23/05/2026"),
+            Some("Thiago"),
+            &images,
+        )
+        .unwrap();
+
+        assert!(index.exists());
+        assert_eq!(index.file_name().unwrap(), "index.html");
+
+        let html = fs::read_to_string(&index).unwrap();
+        // Título no <h1> + no <title>
+        assert!(html.contains("<h1>Nova permissão de cadastro de produto</h1>"));
+        assert!(html.contains("<title>Nova permissão de cadastro de produto</title>"));
+        // Meta line com release + data + autor
+        assert!(html.contains("Release v2.55.0 — 23/05/2026"));
+        assert!(html.contains("Thiago"));
+        // Seções renderizadas como <h2>
+        assert!(html.contains("<h2>Objetivo :</h2>"));
+        assert!(html.contains("<h2>Passo a passo :</h2>"));
+        // Galeria com paths relativos + ext normalizada
+        assert!(html.contains("imagens/01.png"));
+        assert!(html.contains("imagens/02.jpg"));
+        assert!(html.contains("Tela inicial do menu"));
+        assert!(html.contains("Detalhe do novo botão"));
+
+        // Imagens salvas na pasta correta
+        let cartilha_dir = index.parent().unwrap();
+        assert!(cartilha_dir.join("imagens/01.png").exists());
+        assert!(cartilha_dir.join("imagens/02.jpg").exists());
+    }
+
+    #[test]
+    fn save_cartilha_rejects_empty_title_or_content() {
+        let dir = temp_vault();
+        let img = CartilhaImageInput { bytes: b"x", extension: "png", caption: "" };
+        assert!(save_cartilha(&dir, "", "conteudo", None, None, &[img]).is_err());
+        assert!(save_cartilha(&dir, "Titulo", "", None, None, &[]).is_err());
+        assert!(save_cartilha(&dir, "Titulo", "  \n\t ", None, None, &[]).is_err());
+    }
+
+    #[test]
+    fn save_cartilha_slug_handles_special_chars_and_truncates() {
+        let dir = temp_vault();
+        let huge_title = "Implementação de Cadastro de Produto com Permissões Específicas e Auditoria Completa do Sistema";
+        let index = save_cartilha(
+            &dir,
+            huge_title,
+            "[s]Resumo :[/s]\n\nteste",
+            None,
+            None,
+            &[],
+        )
+        .unwrap();
+        let folder_name = index.parent().unwrap().file_name().unwrap().to_str().unwrap();
+        // Formato YYYY-MM-DD-slug; slug max 60 chars
+        let parts: Vec<&str> = folder_name.splitn(2, '-').collect();
+        let _date_part = parts[0]; // YYYY
+        // O slug propriamente é tudo depois de "YYYY-MM-DD-"
+        let after_date = &folder_name[11..]; // skip "YYYY-MM-DD-"
+        assert!(after_date.len() <= 60, "slug {} excedeu 60 chars", after_date.len());
+        assert!(folder_name.contains("implementacao"));
+    }
+
+    #[test]
+    fn content_to_html_handles_sections_and_paragraphs() {
+        let input = "[s]Objetivo :[/s]\n\nLinha 1.\nLinha 2.\n\nNovo parágrafo.";
+        let html = content_to_html(input);
+        assert!(html.contains("<h2>Objetivo :</h2>"));
+        // Linha simples vira <br> dentro do mesmo <p>
+        assert!(html.contains("<p>Linha 1.<br>Linha 2.</p>"));
+        // Linha duplicada vira novo <p>
+        assert!(html.contains("<p>Novo parágrafo.</p>"));
+    }
+
+    #[test]
+    fn content_to_html_escapes_html_entities() {
+        let input = "Texto com <script>alert('xss')</script> e &amp;";
+        let html = content_to_html(input);
+        assert!(!html.contains("<script>"));
+        assert!(html.contains("&lt;script&gt;"));
+        assert!(html.contains("&amp;amp;")); // & original já era &amp; e é re-escapado
+    }
+
+    #[test]
+    fn content_to_html_handles_unclosed_section_tag() {
+        // [s] sem [/s] não deve fazer crash; vira texto cru escapado
+        let input = "[s]Sem fim";
+        let html = content_to_html(input);
+        assert!(html.contains("[s]Sem fim") || html.contains("&#91;s&#93;Sem fim"));
     }
 }

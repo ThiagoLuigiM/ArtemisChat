@@ -32,6 +32,142 @@ pub async fn open_chat(app: AppHandle) -> Result<(), String> {
 }
 
 // ───────────────────────────────────────────────────────────────────────────────
+// Cartilha HTML (#22) — gera prosa didática via IA + salva HTML+imagens no vault
+// ───────────────────────────────────────────────────────────────────────────────
+
+#[derive(serde::Deserialize)]
+pub struct CartilhaImageDto {
+    /// Bytes brutos da imagem. Frontend envia como Uint8Array → Tauri serializa
+    /// como `Vec<u8>` automaticamente (sem precisar base64).
+    pub bytes: Vec<u8>,
+    /// "png", "jpg", "jpeg", "webp", etc. Sanitizada pelo `save_cartilha`.
+    pub extension: String,
+    pub caption: String,
+}
+
+#[derive(Serialize, Clone)]
+struct CartilhaTokenEvent {
+    content: String,
+}
+
+/// Stream da geração de cartilha. Mesma mecânica do `stream_completion` (devolutiva)
+/// mas com prompt didático e eventos separados: `cartilha-token` / `cartilha-done`.
+/// Não bloqueia o stream principal — usuário pode gerar ambos em janelas separadas.
+#[tauri::command]
+pub async fn stream_cartilha(
+    app: AppHandle,
+    form_input: String,
+    audience: String,
+    image_captions: Vec<String>,
+) -> Result<(), String> {
+    let api_key = settings::load_api_key()
+        .map_err(|e| e.to_string())?
+        .ok_or_else(|| "API key da DeepSeek não configurada.".to_string())?;
+
+    let messages = deepseek::build_cartilha_messages(&form_input, &audience, &image_captions);
+
+    let app_emit = app.clone();
+    let result = deepseek::stream_chat(&api_key, messages, move |token| {
+        if let Some(chat) = app_emit.get_webview_window("chat") {
+            let _ = chat.emit(
+                "cartilha-token",
+                CartilhaTokenEvent {
+                    content: token.to_string(),
+                },
+            );
+        }
+    })
+    .await;
+
+    if let Some(chat) = app.get_webview_window("chat") {
+        let _ = chat.emit("cartilha-done", ());
+    }
+    result.map_err(|e| e.to_string())
+}
+
+/// Salva a cartilha aprovada pelo usuário no vault. Cria pasta
+/// `cartilhas/YYYY-MM-DD-<slug-titulo>/` com `index.html` + `imagens/NN.ext`.
+/// Retorna o path absoluto do `index.html` gerado.
+#[tauri::command]
+pub fn save_cartilha(
+    title: String,
+    content: String,
+    release: Option<String>,
+    author: Option<String>,
+    images: Vec<CartilhaImageDto>,
+    vault_state: State<'_, VaultState>,
+) -> Result<String, String> {
+    let vault_path = vault_state
+        .loader
+        .read()
+        .unwrap()
+        .status()
+        .path
+        .clone()
+        .ok_or_else(|| "Vault não configurado — selecione a pasta nas Configurações.".to_string())?;
+
+    let image_inputs: Vec<vault::CartilhaImageInput> = images
+        .iter()
+        .map(|img| vault::CartilhaImageInput {
+            bytes: &img.bytes,
+            extension: &img.extension,
+            caption: &img.caption,
+        })
+        .collect();
+
+    let path = PathBuf::from(&vault_path);
+    let index = vault::save_cartilha(
+        &path,
+        &title,
+        &content,
+        release.as_deref(),
+        author.as_deref(),
+        &image_inputs,
+    )
+    .map_err(|e| e.to_string())?;
+
+    tracing::info!(
+        "cartilha salva: {} ({} imagens)",
+        index.display(),
+        image_inputs.len()
+    );
+
+    Ok(index.to_string_lossy().into_owned())
+}
+
+// ───────────────────────────────────────────────────────────────────────────────
+// Form de testes (#23) — sugestões de cenários via IA + compilação do texto final
+// ───────────────────────────────────────────────────────────────────────────────
+
+/// Abre um arquivo ou pasta no aplicativo padrão do sistema (browser para HTML,
+/// Explorer para pastas). Windows-only — usa `cmd /c start`. Evita adicionar
+/// `tauri-plugin-shell` ou `tauri-plugin-opener` só para isso.
+#[tauri::command]
+pub fn open_in_system(path: String) -> Result<(), String> {
+    use std::process::Command;
+    Command::new("cmd")
+        .args(["/c", "start", "", &path])
+        .spawn()
+        .map_err(|e| format!("falha ao abrir {}: {}", path, e))?;
+    Ok(())
+}
+
+/// Pede à IA pra sugerir cenários/regressão/riscos a partir do input do FormView.
+/// Frontend pode pré-preencher os textareas do TestesView com o retorno.
+#[tauri::command]
+pub async fn suggest_test_scenarios(
+    form_input: String,
+) -> Result<deepseek::TestScenariosSuggestion, String> {
+    let api_key = settings::load_api_key()
+        .map_err(|e| e.to_string())?
+        .ok_or_else(|| "API key da DeepSeek não configurada.".to_string())?;
+
+    deepseek::suggest_test_scenarios(&api_key, &form_input)
+        .await
+        .map_err(|e| format!("Sugestão falhou: {}", e))
+}
+
+// ───────────────────────────────────────────────────────────────────────────────
 // Frases-modelo via IA (#21) — extrai templates recorrentes do final_output
 // das aprovadas e propõe acréscimos à seção "Frases-modelo aprovadas" do
 // campos-padrao.md.

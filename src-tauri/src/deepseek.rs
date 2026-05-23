@@ -281,6 +281,191 @@ pub async fn analyze_edits(
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// Cartilha didática — prompt builder para gerar conteúdo de cartilha HTML
+// a partir do mesmo input do FormView, com tom apropriado ao público alvo.
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Monta as messages para gerar uma cartilha didática. Reusa `stream_chat`
+/// (streaming SSE) — o comando Tauri controla os eventos emitidos.
+///
+/// `audience` aceita "suporte", "cliente" ou "interno". Default razoável para
+/// valores desconhecidos: "suporte".
+///
+/// `image_captions` é apenas informativa pra IA mencionar "ver imagem N" onde
+/// apropriado; o renderer HTML coloca todas as imagens numa galeria no fim.
+pub fn build_cartilha_messages(
+    form_input: &str,
+    audience: &str,
+    image_captions: &[String],
+) -> Vec<ChatMessage> {
+    let audience_block = match audience {
+        "cliente" => "USUÁRIOS FINAIS do cliente (não técnicos). Linguagem acessível, sem jargão de programador. Foco em 'como usar' não em 'como funciona internamente'.",
+        "interno" => "EQUIPE INTERNA da empresa (dev/suporte/QA). Pode usar termos técnicos sem explicar. Foco em estrutura e detalhes operacionais.",
+        _ => "TIME DE SUPORTE N1. Português técnico mas explicativo — eles conhecem o sistema mas não os detalhes da implementação. Explique parâmetros novos e onde encontrá-los.",
+    };
+
+    let images_hint = if image_captions.is_empty() {
+        String::new()
+    } else {
+        let mut s = String::from("\n\nO dev anexou as seguintes imagens (na ordem):\n");
+        for (i, cap) in image_captions.iter().enumerate() {
+            s.push_str(&format!("- Imagem {}: {}\n", i + 1, cap));
+        }
+        s.push_str("\nCite cada imagem onde for relevante no texto (ex: \"conforme a imagem 1\"). Todas serão renderizadas numa galeria no fim do documento.");
+        s
+    };
+
+    let prompt = format!(
+        "Você gera uma CARTILHA DIDÁTICA em português brasileiro a partir de uma especificação técnica.\n\n\
+        Público-alvo: {audience}\n\n\
+        Estruture o texto em seções, cada seção precedida por uma TAG ESPECIAL `[s]Título :[/s]` (parser equivalente ao `[n]` da devolutiva, mas para 'section'). Por exemplo:\n\
+        `[s]Objetivo :[/s]`\n\n\
+        Seções típicas (use as que fizerem sentido para o caso; omita as que não se aplicam):\n\
+        - Objetivo (por que existe)\n\
+        - O que mudou (resumo do delta)\n\
+        - Pré-requisitos (versão mínima, permissões necessárias)\n\
+        - Passo a passo (instruções numeradas ou em prosa)\n\
+        - Observações (cuidados, limitações, dicas){images_hint}\n\n\
+        REGRAS:\n\
+        - NÃO use markdown (`#`, `**`, `*`, listas com `-` no início de linha funcionam se você quiser destaque, mas SEM hashes).\n\
+        - NÃO use as tags `[n]...[/n]` (essas são da devolutiva N1, formato diferente).\n\
+        - Frases curtas, voz ativa, tom direto mas amigável.\n\
+        - Se o input mencionar nova permissão/parâmetro/caminho, dedique uma seção a explicar passo a passo onde encontrar.\n\
+        - Termine SEM despedidas ('Espero ter ajudado', etc.). A cartilha é referência, não conversa.\n\n\
+        ═══ ESPECIFICAÇÃO TÉCNICA ═══\n\n{form_input}",
+        audience = audience_block,
+        images_hint = images_hint,
+        form_input = form_input.trim(),
+    );
+
+    vec![ChatMessage {
+        role: "user".to_string(),
+        content: prompt,
+    }]
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Form de testes — sugestão de cenários via IA, baseada no input do FormView
+// ─────────────────────────────────────────────────────────────────────────────
+
+#[derive(serde::Deserialize, serde::Serialize, Clone, Debug, Default)]
+pub struct TestScenariosSuggestion {
+    pub happy_path: String,
+    pub edge_cases: String,
+    pub negative_cases: String,
+    pub acceptance_criteria: String,
+    pub regression_areas: String,
+    pub risks: String,
+}
+
+/// Pede à IA pra sugerir cenários de teste baseados no contexto do dev.
+/// Não-streaming, retorna o objeto preenchido. Usuário pode revisar/editar
+/// antes de incluir na saída final.
+pub async fn suggest_test_scenarios(
+    api_key: &str,
+    form_input: &str,
+) -> anyhow::Result<TestScenariosSuggestion> {
+    if form_input.trim().is_empty() {
+        anyhow::bail!("input vazio — nada pra sugerir");
+    }
+
+    let prompt = format!(
+        "Você ajuda um dev a montar o formulário de testes para entregar para a equipe QA. Baseado na descrição da mudança abaixo, sugira:\n\n\
+        - `happy_path`: passo a passo do caminho feliz que deve funcionar.\n\
+        - `edge_cases`: cenários-limite (valores extremos, vazios, máximos, mínimos).\n\
+        - `negative_cases`: cenários que devem ser BLOQUEADOS/REJEITADOS pelo sistema.\n\
+        - `acceptance_criteria`: condições objetivas para QA aprovar (ex: 'mensagem X aparece após Y').\n\
+        - `regression_areas`: outras funcionalidades correlatas que merecem re-teste.\n\
+        - `risks`: pontos de atenção, dependências, limitações conhecidas.\n\n\
+        REGRAS:\n\
+        - APENAS JSON puro, sem texto antes ou depois, sem fences markdown.\n\
+        - Cada campo é uma STRING (use `\\n` para múltiplas linhas; pode usar `- ` para listas dentro da string).\n\
+        - Se um campo não for aplicável ao caso, devolva string vazia.\n\
+        - Português brasileiro, tom técnico direto, sem floreios.\n\n\
+        Estrutura JSON esperada:\n\
+        {{\"happy_path\":\"...\",\"edge_cases\":\"...\",\"negative_cases\":\"...\",\"acceptance_criteria\":\"...\",\"regression_areas\":\"...\",\"risks\":\"...\"}}\n\n\
+        ═══ DESCRIÇÃO DA MUDANÇA ═══\n\n{form_input}",
+        form_input = form_input.trim(),
+    );
+
+    let messages = vec![ChatMessage {
+        role: "user".to_string(),
+        content: prompt,
+    }];
+
+    let body = ClassifyRequest {
+        model: "deepseek-chat",
+        messages: &messages,
+        stream: false,
+        temperature: 0.4,
+        max_tokens: 2048,
+    };
+
+    let client = reqwest::Client::new();
+    let resp = client
+        .post(API_URL)
+        .bearer_auth(api_key)
+        .header("Content-Type", "application/json")
+        .json(&body)
+        .send()
+        .await?
+        .error_for_status()?
+        .json::<ClassifyResponse>()
+        .await?;
+
+    let raw = resp
+        .choices
+        .first()
+        .map(|c| c.message.content.as_str())
+        .unwrap_or("{}");
+
+    let json_slice = extract_json_object(raw).unwrap_or("{}");
+    match serde_json::from_str::<TestScenariosSuggestion>(json_slice) {
+        Ok(s) => Ok(s),
+        Err(e) => {
+            tracing::warn!("falha parseando sugestão de cenários: {} (raw: {:?})", e, raw);
+            Ok(TestScenariosSuggestion::default())
+        }
+    }
+}
+
+/// Versão de `extract_json_array` para objetos `{...}`. Mesma estratégia: encontra
+/// o primeiro `{` balanceado, respeitando strings com escape.
+fn extract_json_object(s: &str) -> Option<&str> {
+    let start = s.find('{')?;
+    let bytes = s.as_bytes();
+    let mut depth = 0i32;
+    let mut in_string = false;
+    let mut escaped = false;
+    for (i, &b) in bytes.iter().enumerate().skip(start) {
+        if escaped {
+            escaped = false;
+            continue;
+        }
+        if b == b'\\' && in_string {
+            escaped = true;
+            continue;
+        }
+        if b == b'"' {
+            in_string = !in_string;
+            continue;
+        }
+        if in_string {
+            continue;
+        }
+        if b == b'{' {
+            depth += 1;
+        } else if b == b'}' {
+            depth -= 1;
+            if depth == 0 {
+                return Some(&s[start..=i]);
+            }
+        }
+    }
+    None
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // extract_phrase_templates — analisa amostras de final_output das aprovadas
 // para extrair frases recorrentes como templates parametrizados. (#21)
 // ─────────────────────────────────────────────────────────────────────────────
@@ -648,5 +833,28 @@ mod tests {
     fn extract_markdown_starts_already_with_h1() {
         let raw = "# Já começa bem\n\nResto";
         assert_eq!(extract_markdown_doc(raw), "# Já começa bem\n\nResto");
+    }
+
+    #[test]
+    fn extract_json_object_basic() {
+        let raw = "Aqui está: {\"a\":1,\"b\":\"foo\"} fim";
+        assert_eq!(extract_json_object(raw), Some("{\"a\":1,\"b\":\"foo\"}"));
+    }
+
+    #[test]
+    fn extract_json_object_handles_nested_braces() {
+        let raw = "{\"outer\":{\"inner\":{\"x\":1}}}";
+        assert_eq!(extract_json_object(raw), Some(raw));
+    }
+
+    #[test]
+    fn extract_json_object_handles_braces_in_strings() {
+        let raw = "{\"text\":\"{nested} braces inside string\",\"n\":2}";
+        assert_eq!(extract_json_object(raw), Some(raw));
+    }
+
+    #[test]
+    fn extract_json_object_none_when_absent() {
+        assert!(extract_json_object("nada de json aqui").is_none());
     }
 }

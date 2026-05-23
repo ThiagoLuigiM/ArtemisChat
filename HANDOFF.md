@@ -144,6 +144,10 @@ DevReturn/                            ← pasta raiz (nome legado, não renomead
 | `apply_campos_suggestions` | `release_accepted: Option<String>, paths_accepted: Vec<String>` | `String` (nome do arquivo escrito) | Faz backup em `campos-padrao.md.bak`; substitui linha "Release atual" via regex/parser; appenda caminhos na seção "Caminhos recorrentes" com marker `<!-- auto-aprendidos em DATA -->`; recarrega vault |
 | `analyze_phrase_templates` | — | `Vec<PhraseTemplate>` | Lê até 80 aprovadas + campos-padrao atual; chama DeepSeek com prompt que pede JSON `[{situation, template, occurrences}]` evitando duplicar frases já presentes. NÃO escreve em lugar nenhum |
 | `apply_phrase_templates` | `templates: Vec<PhraseTemplate>` | `String` (nome do arquivo escrito) | Faz backup em `campos-padrao.md.bak`; appenda templates aceitos na seção "Frases-modelo aprovadas" (formato `**<situation>:**\n> <template>`) sob marker; recarrega vault |
+| `stream_cartilha` | `form_input, audience, image_captions` | — | Stream da geração de cartilha didática via DeepSeek; emite events `cartilha-token` / `cartilha-done` (separados dos da devolutiva pra UI não confundir) |
+| `save_cartilha` | `title, content, release?, author?, images: Vec<CartilhaImageDto>` | `String` (path do `index.html`) | Cria `vault/cartilhas/YYYY-MM-DD-<slug>/index.html` + `imagens/NN.ext`. HTML self-contained (CSS inline). Imagens chegam como `Vec<u8>` direto, sem precisar base64 |
+| `open_in_system` | `path: String` | — | Abre arquivo/pasta no app padrão do sistema (Windows: `cmd /c start`). Usado pra abrir cartilha gerada no navegador |
+| `suggest_test_scenarios` | `form_input: String` | `TestScenariosSuggestion { happy_path, edge_cases, negative_cases, acceptance_criteria, regression_areas, risks }` | Pede à IA pra preencher cenários do form de testes a partir do contexto do FormView. JSON puro, parser via `extract_json_object`. Frontend pré-preenche os textareas |
 | `get_autostart_enabled` | — | `bool` | Lê do registro do Windows se o app está configurado pra iniciar com o sistema |
 | `set_autostart_enabled` | `enabled: bool` | — | Liga/desliga autostart via `tauri-plugin-autostart` |
 | `check_for_update` | — | `UpdateInfo { available, current_version, new_version, release_notes }` | Consulta o endpoint do updater (GitHub releases) e retorna info da última versão. NÃO baixa |
@@ -156,13 +160,14 @@ DevReturn/                            ← pasta raiz (nome legado, não renomead
 - `vault-changed` (`VaultStatus`) — quando notify detecta mudança nos `.md` de **regra** (estilo/evitar/campos-padrao). NÃO dispara para `exemplos-*.md` — esses são lidos sob demanda na próxima geração.
 - `category-detected` (`{ category: String, examples_used: usize }`) — após classify, antes do stream começar
 - `tray-open-settings` (vazio) — emitido pelo backend quando o usuário clica em "Configurações" no menu do tray; o `ChatWindow` escuta e abre direto o `SettingsPanel`
+- `cartilha-token` (`{ content: String }`) / `cartilha-done` — stream da geração de cartilha HTML (#22). Eventos separados dos da devolutiva pra UI não embaralhar contextos.
 
 ## Arquitetura da UI (estado atual 2026-05-23)
 
 ```
-ChatWindow  (view: "form" | "result";  showSettings, showLearning: boolean)
-├── view=="form"   → FormView
-│     └── 10 campos → compileForm() → string → invoke(stream_completion)
+ChatWindow  (view: "form" | "result" | "cartilha" | "testes";  showSettings, showLearning: boolean)
+├── view=="form"   → FormView (3 botões: Cartilha · Form testes · Devolutiva N1)
+│     └── 10 campos → compileForm() → string → invoke(stream_completion / stream_cartilha / suggest_test_scenarios)
 ├── view=="result" → ResultView
 │     ├── Chip de categoria no topo: "categoria: fiscal · N exemplos"
 │     │     (aparece após `category-detected`, antes do streaming terminar)
@@ -172,6 +177,18 @@ ChatWindow  (view: "form" | "result";  showSettings, showLearning: boolean)
 │     │     ├── "Descartar" (vermelho)         → invoke(discard_entry)
 │     │     ├── "Nova devolutiva" (cinza)      → abandona sem registrar
 │     │     └── "Copiar e aprovar" (azul)      → clipboard + invoke(approve_entry)
+├── view=="cartilha" → CartilhaView (#22)
+│     ├── Título + Autor + Audience (select: suporte/cliente/interno)
+│     ├── Área de imagens: paste (Ctrl+V) + drag-and-drop + file picker
+│     ├── Heurística "imagens obrigatórias" se campo `parametro` preenchido ou `correcao` contém palavras-chave de fluxo
+│     ├── Botão "Gerar conteúdo" → stream_cartilha → eventos cartilha-token/done
+│     ├── Textarea editável com proposta da IA
+│     └── Botão "Salvar no vault" → save_cartilha → escreve vault/cartilhas/YYYY-MM-DD-<slug>/{index.html, imagens/}
+├── view=="testes" → TestesView (#23)
+│     ├── 6 seções: Identificação · Pré-requisitos · Cenários · Regressão · Riscos
+│     ├── Campos prefilled do FormView (scripts, parametros, cenario, validacao → happyPath)
+│     ├── Botão "Sugerir com IA" → suggest_test_scenarios → preenche cenários/regressão/riscos
+│     └── Botão "Gerar e copiar" → compileTestesText() → clipboard com tags `[n]...[/n]`
 ├── showSettings   → SettingsPanel  (botão ⚙ no header)
 │     ├── API key  (invoke set_api_key)
 │     └── Vault picker (dialog → invoke set_vault_path / seed_vault)
@@ -446,13 +463,59 @@ Pacote completo de integração com o sistema operacional Windows.
 
 **Tripleto+1 fechado:** `evitar.md` (#18 negativo) + `estilo.md` (#19 positivo) + `campos-padrao.md` em 2 dimensões: factual (#20 release/caminhos, parsing puro) + semântico (#21 frases-modelo via IA).
 
+### ✅ #22 — Cartilha HTML didática (concluída 2026-05-23)
+Geração automatizada de cartilhas a partir do mesmo input do FormView, com imagens obrigatórias quando há mudança de fluxo ou novo parâmetro.
+
+**Backend:**
+- `deepseek::build_cartilha_messages(form_input, audience, image_captions)` — prompt didático que estrutura saída em `[s]Título :[/s]` (variante do `[n]` da devolutiva, mas para "section"). Audience seleciona tom: suporte (técnico explicativo), cliente (acessível sem jargão), interno (técnico denso).
+- `vault::save_cartilha(...)` + tipo `CartilhaImageInput { bytes, extension, caption }`. Cria `cartilhas/YYYY-MM-DD-<slug>/index.html` + `imagens/01.ext`, `02.ext`, ... Slug ASCII kebab-case, truncado a 60 chars pra não estourar limite de path do Windows. HTML self-contained com CSS inline (sem dependências externas, abre em qualquer browser ou offline).
+- `vault::content_to_html(content)` — parser que converte `[s]...[/s]` em `<h2>`, quebras duplas em `<p>` separados, simples em `<br>`. Escape HTML em todos os campos pra evitar quebrar o template.
+- Comandos Tauri: `stream_cartilha` (streaming SSE, eventos `cartilha-token`/`cartilha-done` separados), `save_cartilha` (recebe imagens como `Vec<u8>` direto, sem base64), `open_in_system` (Windows `cmd /c start`).
+
+**Frontend:**
+- `CartilhaView` componente: input para título + autor + audience (select), área de imagens com paste (`document.addEventListener("paste", ...)`) + drag-and-drop + file picker.
+- Heurística `cartilhaImagesRequired(form)`: imagens obrigatórias se campo `parametro` preenchido OU `correcao` contém palavras-chave (`nova tela`, `novo botão`, `novo fluxo`, `nova permissão`, etc.). UI mostra badge vermelho com razão e desabilita "Gerar conteúdo".
+- Stream em `<pre>` durante geração; `<textarea>` editável depois pra usuário ajustar antes de salvar.
+- Após salvar: botão "Abrir no navegador" via `open_in_system`.
+
+**Template HTML:** CSS inline (variáveis CSS pra tema), header com título+release+data+autor, conteúdo em `<main>`, galeria de imagens em `<figure>+<figcaption>` no fim, footer com referência ao Artemis, media query `@media print` para impressão.
+
+**Tests:** 5 testes em `vault.rs` cobrindo `save_cartilha` (cria pasta+imagens+HTML, rejeita título/conteúdo vazios, slug truncado/sanitizado) e `content_to_html` (seções+parágrafos, escape XSS, tag não fechada).
+
+### ✅ #23 — Formulário de testes para QA (concluída 2026-05-23)
+Form complementar pra dev mandar pra equipe de testes; estrutura definida pelo Artemis (a equipe não forneceu diretriz).
+
+**Estrutura (6 seções):**
+1. **Identificação** — Ticket, data de entrega, tipo (Correção / Nova feature / Melhoria), release (do FormView)
+2. **Pré-requisitos** — Ambiente (Homologação / Espelho / Dev), Scripts (prefill), Parâmetros (prefill), Dados de teste
+3. **Cenários** — Caminho feliz, Edge cases, Cenários negativos, Critérios de aceitação
+4. **Regressão** — Áreas afetadas que devem ser revalidadas
+5. **Riscos** — Limitações, cenários não simulados (prefill)
+
+**Backend:**
+- `deepseek::suggest_test_scenarios(api_key, form_input) -> TestScenariosSuggestion` — chamada não-streaming, temp 0.4, max_tokens 2048. Prompt pede JSON com 6 campos string; parser `extract_json_object` (novo, análogo a `extract_json_array`).
+- Tipo `TestScenariosSuggestion { happy_path, edge_cases, negative_cases, acceptance_criteria, regression_areas, risks }`.
+- Comando Tauri: `suggest_test_scenarios { form_input }`.
+
+**Frontend:**
+- `TestesView` componente com 6 seções, prefill de campos do FormView (scripts/parametros/cenario/validacao).
+- Botão "Sugerir com IA" no header da seção 3 (Cenários) → preenche 4 textareas (happy/edge/negative/criteria) + 2 (regression/risks).
+- Botão "Gerar e copiar" → `compileTestesText()` monta texto usando mesmas tags `[n]...[/n]` da devolutiva pra consistência visual no ticket → `navigator.clipboard.writeText(...)`.
+
+**Decisão deliberada:** sem persistência SQLite nesta versão. O form é descartável após copiar pro ticket. Se equipe QA pedir histórico depois, adicionar coluna `test_form: Option<String>` na `entries` é trivial (migration idempotente já tem padrão estabelecido).
+
 ### ⏳ Próximas fases pendentes
 - **Configurabilidade de hotkey** — UI de captura + persistência em config.json + re-registro dinâmico do global shortcut
 - **Cifrar API key com DPAPI** — substituir plaintext em `config.json` por `CryptProtectData` escopo current-user (vide gotcha #1)
+- **Imagens inline na cartilha (opcional)** — hoje todas vão pra galeria no fim. Próxima iteração: IA gera placeholders `[img:01]` no texto e renderer substitui por `<figure>` inline
 
-## Próximo passo imediato (status 2026-05-23 sessão 6)
+## Próximo passo imediato (status 2026-05-23 sessão 7)
 
-**#21 (frases-modelo via IA)** entregue. 4ª tab no LearningPanel completa o sistema de auto-aprendizado. Backend + frontend passam em `cargo check` (0 warnings), `cargo test --lib` (49/49, +3 novos para `append_phrase_templates`) e `tsc --noEmit` (0 erros).
+**#22 (cartilha HTML) + #23 (form de testes)** entregues. Mesmo input do FormView agora alimenta 3 outputs paralelos: devolutiva N1 (já existia) + cartilha HTML salva no vault + form de testes copiado pro clipboard. 59/59 testes Rust passam (+10 novos: 5 cartilha + 5 deepseek), `cargo check` 0 warnings, `tsc --noEmit` 0 erros.
+
+### Validação manual pendente do usuário:
+1. **Cartilha:** preencher formulário com algo que inclua "novo botão" ou similar → clicar "Cartilha" → ver badge de imagens obrigatórias → colar/arrastar 1-2 imagens com legendas → "Gerar conteúdo" → revisar texto → "Salvar no vault" → conferir `vault/cartilhas/YYYY-MM-DD-<slug>/index.html` no Obsidian ou abrir no browser
+2. **Form de testes:** preencher formulário com um cenário qualquer → clicar "Form de testes" → conferir prefill → "Sugerir com IA" e ver sugestões aparecerem → editar se quiser → "Gerar e copiar" → colar no Notepad pra verificar formato
 
 ### ⚠️ Setup pendente para o auto-updater funcionar (ação do usuário, ainda do roteiro anterior)
 
@@ -571,4 +634,4 @@ Em `C:\Users\Borge\.claude\projects\E--Projetos-Thiago-Space-WorkSpaceArtemis\me
 
 ---
 
-**Última atividade:** Sessão Claude Opus 4.7 (sexta continuação) em 2026-05-23 BRT. Entregue nesta sessão: **#21 — frases-modelo via IA**. `deepseek::extract_phrase_templates` envia até 80 final_outputs aprovados + campos-padrao.md atual num único prompt; pede JSON `[{situation, template, occurrences}]` com placeholders nas partes variáveis e checagem de não-redundância contra o arquivo atual. Reusa parser robusto `extract_json_array`. `vault::append_phrase_templates` faz backup em `.bak`, encontra ou cria a seção `## Frases-modelo aprovadas`, e appenda items no formato `**<situation>:**\n> <template>` sob marker `<!-- auto-aprendidos em DATA -->`. 4ª tab `FrasesTab` no LearningPanel; estilos `.phrase-situation`/`.phrase-template` adicionados. 49/49 testes Rust (3 novos), `cargo check` 0 warnings, `tsc --noEmit` 0 erros. Sistema de auto-aprendizado agora completo em 4 dimensões: negativo (evitar.md #18) + positivo (estilo.md #19) + factual (campos #20) + semântico (frases #21). Sessão anterior (5ª) entregou Fase 4 + setup do GitHub repo + release v0.1.0 publicada com sucesso (workflow CI rodou ok).
+**Última atividade:** Sessão Claude Opus 4.7 (sétima continuação) em 2026-05-23 BRT. Entregues nesta sessão: **#22 (cartilha HTML didática)** e **#23 (form de testes pra QA)**. Cartilha: `deepseek::build_cartilha_messages` constrói prompt com audience configurável (suporte/cliente/interno), stream via eventos `cartilha-token`/`cartilha-done`; `vault::save_cartilha` cria `cartilhas/YYYY-MM-DD-<slug>/index.html` + subpasta `imagens/`, template HTML self-contained com CSS inline; UI `CartilhaView` suporta paste (Ctrl+V) + drag-and-drop + file picker pra imagens, com heurística `cartilhaImagesRequired` que obriga imagens quando há `parametro` preenchido ou palavras-chave de fluxo no `correcao`. Form de testes: `deepseek::suggest_test_scenarios` retorna `TestScenariosSuggestion` JSON; novo parser `extract_json_object` análogo ao `extract_json_array`; UI `TestesView` com 6 seções (Identificação/Pré-req/Cenários/Regressão/Riscos), prefill do FormView, "Sugerir com IA", "Gerar e copiar" usando tags `[n]...[/n]`. FormView ganhou 3 botões na footer (Cartilha · Form testes · Devolutiva N1). 59/59 testes (+10 novos: 5 cartilha + 5 deepseek/extract_json_object), `cargo check` 0 warnings, `tsc --noEmit` 0 erros. Decisão: cartilha salva no vault (artefato histórico); form de testes só vai pro clipboard (descartável). Plus: novo comando `open_in_system` (sem plugin extra — usa `cmd /c start`) pra abrir cartilha no navegador padrão.
