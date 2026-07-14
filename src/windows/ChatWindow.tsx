@@ -1692,6 +1692,7 @@ function CartilhaView({
   const [streamingDone, setStreamingDone] = useState(false);
 
   const [saving, setSaving] = useState(false);
+  const [previewing, setPreviewing] = useState(false);
   const [savedPath, setSavedPath] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
 
@@ -1819,6 +1820,26 @@ function CartilhaView({
       await invoke("open_in_system", { path: savedPath });
     } catch (e) {
       setError(`Erro ao abrir: ${String(e)}`);
+    }
+  };
+
+  const handlePreview = async () => {
+    if (!editedContent.trim()) return;
+    setPreviewing(true);
+    setError(null);
+    try {
+      const path = await invoke<string>("preview_cartilha", {
+        title: titulo.trim(),
+        content: editedContent,
+        release: release.trim() || null,
+        author: autor.trim() || null,
+        images: images.map(({ bytes, extension, caption }) => ({ bytes, extension, caption })),
+      });
+      await invoke("open_in_system", { path });
+    } catch (e) {
+      setError(`Erro ao pré-visualizar: ${String(e)}`);
+    } finally {
+      setPreviewing(false);
     }
   };
 
@@ -1978,7 +1999,9 @@ function CartilhaView({
               <>
                 <p className="help">
                   Revise e edite antes de salvar. Use <code>[s]Título :[/s]</code> para
-                  marcar novas seções (vira <code>&lt;h2&gt;</code> no HTML).
+                  seções, <code>[img 1]</code> em linha própria para posicionar imagens e{" "}
+                  <code>[dica]</code>/<code>[atencao]</code>/<code>[ok]</code> para caixas
+                  de destaque.
                 </p>
                 <textarea
                   className="cartilha-editor"
@@ -1997,14 +2020,23 @@ function CartilhaView({
                       setEditedContent("");
                       setStreamingDone(false);
                     }}
-                    disabled={saving}
+                    disabled={saving || previewing}
                   >
                     Gerar novamente
                   </button>
                   <button
                     type="button"
+                    className="btn-secondary"
+                    onClick={handlePreview}
+                    disabled={saving || previewing || !editedContent.trim()}
+                    title="Renderiza o HTML numa pasta temporária e abre no navegador (não salva no vault)"
+                  >
+                    {previewing ? "Abrindo..." : "Pré-visualizar"}
+                  </button>
+                  <button
+                    type="button"
                     onClick={handleSave}
-                    disabled={saving || !editedContent.trim()}
+                    disabled={saving || previewing || !editedContent.trim()}
                   >
                     {saving ? "Salvando..." : "Salvar no vault"}
                   </button>

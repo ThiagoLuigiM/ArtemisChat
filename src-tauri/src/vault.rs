@@ -561,6 +561,40 @@ pub fn save_cartilha(
     author: Option<&str>,
     images: &[CartilhaImageInput],
 ) -> anyhow::Result<PathBuf> {
+    let date = chrono::Local::now().format("%Y-%m-%d").to_string();
+    let slug = slug_from_title(title);
+    let cartilha_dir = vault_path.join("cartilhas").join(format!("{}-{}", date, slug));
+    write_cartilha_bundle(&cartilha_dir, title, content, release, author, images)
+}
+
+/// Renderiza a cartilha numa pasta temporária FIXA (fora do vault), recriada a
+/// cada chamada, pro usuário pré-visualizar o HTML final no navegador antes de
+/// salvar. Não exige vault configurado. Retorna o path do `index.html`.
+pub fn preview_cartilha(
+    title: &str,
+    content: &str,
+    release: Option<&str>,
+    author: Option<&str>,
+    images: &[CartilhaImageInput],
+) -> anyhow::Result<PathBuf> {
+    let dir = std::env::temp_dir().join("artemis-cartilha-preview");
+    if dir.exists() {
+        fs::remove_dir_all(&dir)?;
+    }
+    write_cartilha_bundle(&dir, title, content, release, author, images)
+}
+
+/// Escreve o bundle completo da cartilha (imagens + index.html) em
+/// `cartilha_dir`. Compartilhado entre `save_cartilha` (vault) e
+/// `preview_cartilha` (pasta temporária).
+fn write_cartilha_bundle(
+    cartilha_dir: &Path,
+    title: &str,
+    content: &str,
+    release: Option<&str>,
+    author: Option<&str>,
+    images: &[CartilhaImageInput],
+) -> anyhow::Result<PathBuf> {
     if title.trim().is_empty() {
         anyhow::bail!("título da cartilha está vazio");
     }
@@ -568,9 +602,6 @@ pub fn save_cartilha(
         anyhow::bail!("conteúdo da cartilha está vazio");
     }
 
-    let date = chrono::Local::now().format("%Y-%m-%d").to_string();
-    let slug = slug_from_title(title);
-    let cartilha_dir = vault_path.join("cartilhas").join(format!("{}-{}", date, slug));
     let imagens_dir = cartilha_dir.join("imagens");
     fs::create_dir_all(&imagens_dir)?;
 
@@ -646,6 +677,8 @@ const CARTILHA_CSS: &str = r#"    :root {
       --borda: #d8e1ec;
       --fundo: #f4f7fb;
       --card: #ffffff;
+      --verde: #1d9a4c;
+      --amarelo: #d69b00;
       --shadow: 0 16px 40px rgba(15, 23, 42, .10);
       --radius: 8px;
       --font: "Segoe UI", Arial, sans-serif;
@@ -785,6 +818,18 @@ const CARTILHA_CSS: &str = r#"    :root {
       line-height: 1.22;
     }
 
+    .callout {
+      margin: 18px 0 12px;
+      padding: 16px 18px;
+      border-left: 5px solid var(--azul);
+      border-radius: 0 var(--radius) var(--radius) 0;
+      background: var(--azul-claro);
+    }
+
+    .callout.ok { border-left-color: var(--verde); background: #eefaf2; }
+    .callout.warn { border-left-color: var(--amarelo); background: #fff7e6; }
+    .callout p:last-child { margin-bottom: 0; }
+
     .screenshot {
       margin: 20px 0 8px;
       border: 1px solid #cbd7e6;
@@ -838,9 +883,10 @@ fn nav_label(heading: &str) -> String {
 
 /// Renderiza o HTML self-contained da cartilha no padrão dos guias oficiais:
 /// sidebar com índice ancorado nas seções, hero com título + chips (release,
-/// data, autor), cada seção `[s]...[/s]` vira um card `<section id=...>` e as
-/// imagens entram numa seção final de screenshots com legenda. Imagens via
-/// path relativo `imagens/NN.ext`. Funciona aberto no browser ou indexado
+/// data, autor) e cada seção `[s]...[/s]` vira um card `<section id=...>`.
+/// Imagens marcadas com `[img N]` no texto são inseridas inline como screenshot
+/// com legenda no ponto do marcador; as não citadas caem numa galeria final.
+/// Paths relativos `imagens/NN.ext`. Funciona aberto no browser ou indexado
 /// pelo Obsidian via plugin de HTML embed.
 fn render_cartilha_html(
     title: &str,
@@ -850,7 +896,8 @@ fn render_cartilha_html(
     date_display: &str,
     image_files: &[(String, String)],
 ) -> String {
-    let sections = content_to_sections(content);
+    let mut used = vec![false; image_files.len()];
+    let sections = content_to_sections(content, image_files, &mut used);
 
     let mut nav_links = String::new();
     let mut sections_html = String::new();
@@ -878,17 +925,19 @@ fn render_cartilha_html(
         }
     }
 
+    // Galeria de fallback: apenas imagens que a IA não posicionou via [img N]
+    let leftovers: Vec<&(String, String)> = image_files
+        .iter()
+        .zip(used.iter())
+        .filter(|(_, was_used)| !**was_used)
+        .map(|(img, _)| img)
+        .collect();
     let mut gallery = String::new();
-    if !image_files.is_empty() {
+    if !leftovers.is_empty() {
         nav_links.push_str("        <a href=\"#imagens-referencia\">Imagens de referência</a>\n");
         gallery.push_str("      <section id=\"imagens-referencia\">\n        <h2>Imagens de referência</h2>\n");
-        for (filename, caption) in image_files {
-            gallery.push_str(&format!(
-                "        <figure class=\"screenshot\">\n          <img src=\"imagens/{}\" alt=\"{}\" loading=\"lazy\">\n          <figcaption class=\"caption\">{}</figcaption>\n        </figure>\n",
-                html_escape(filename),
-                html_escape(caption),
-                html_escape(caption)
-            ));
+        for (filename, caption) in leftovers {
+            gallery.push_str(&figure_html(filename, caption, "        "));
         }
         gallery.push_str("      </section>\n");
     }
@@ -982,13 +1031,43 @@ fn make_section(heading: Option<String>, body_html: String, index: usize) -> Car
     CartilhaSection { id, heading, body_html }
 }
 
+/// Figura de screenshot no padrão dos guias: card com borda + barra de legenda.
+fn figure_html(filename: &str, caption: &str, indent: &str) -> String {
+    format!(
+        "{i}<figure class=\"screenshot\">\n{i}  <img src=\"imagens/{f}\" alt=\"{c}\" loading=\"lazy\">\n{i}  <figcaption class=\"caption\">{c}</figcaption>\n{i}</figure>\n",
+        i = indent,
+        f = html_escape(filename),
+        c = html_escape(caption),
+    )
+}
+
+/// Reconhece um marcador de imagem ocupando a linha inteira: `[img 1]`,
+/// `[img1]` ou `[imagem 1]` (case-insensitive). Retorna o número (1-based).
+fn parse_image_marker(line: &str) -> Option<usize> {
+    let lowered = line.trim().to_lowercase();
+    let inner = lowered.strip_prefix('[')?.strip_suffix(']')?;
+    let digits = inner
+        .strip_prefix("imagem")
+        .or_else(|| inner.strip_prefix("img"))?
+        .trim();
+    if digits.is_empty() || !digits.chars().all(|c| c.is_ascii_digit()) {
+        return None;
+    }
+    digits.parse::<usize>().ok().filter(|n| *n >= 1)
+}
+
 /// Converte o texto bruto da IA em seções estruturadas:
 /// - `[s]Título :[/s]` abre uma nova seção (mesmo padrão do `[n]` da devolutiva,
 ///   mas com `s` de "section" pra diferenciar)
+/// - `[img N]` em linha própria → figura da imagem N inline (marca `used[N-1]`)
 /// - Quebras de linha duplas → novo parágrafo
 /// - Parágrafo só de linhas `- item` → `<ul><li>`
 /// - Quebras simples dentro de parágrafo → `<br>` (preserva passos numerados)
-fn content_to_sections(content: &str) -> Vec<CartilhaSection> {
+fn content_to_sections(
+    content: &str,
+    images: &[(String, String)],
+    used: &mut [bool],
+) -> Vec<CartilhaSection> {
     let mut sections: Vec<CartilhaSection> = Vec::new();
     let mut heading: Option<String> = None;
     let mut body = String::new();
@@ -1003,7 +1082,7 @@ fn content_to_sections(content: &str) -> Vec<CartilhaSection> {
                 heading = Some(h.trim().to_string());
                 body.clear();
             }
-            SectionChunk::Text(t) => body.push_str(&text_to_paragraphs_html(t)),
+            SectionChunk::Text(t) => body.push_str(&text_to_paragraphs_html(t, images, used)),
         }
     }
     if heading.is_some() || !body.trim().is_empty() {
@@ -1022,32 +1101,181 @@ fn content_to_sections(content: &str) -> Vec<CartilhaSection> {
     sections
 }
 
-/// Corpo de uma seção: parágrafos separados por linha em branco; parágrafo
-/// composto só de linhas `- item` vira lista `<ul>`.
-fn text_to_paragraphs_html(text: &str) -> String {
+/// Tipo de caixa de destaque, no padrão visual dos guias oficiais.
+#[derive(Clone, Copy)]
+enum CalloutKind {
+    /// `[dica]` — caixa azul (informação/dica)
+    Dica,
+    /// `[atencao]` — caixa amarela (cuidado/limitação)
+    Atencao,
+    /// `[ok]` — caixa verde (resultado esperado/sucesso)
+    Ok,
+}
+
+impl CalloutKind {
+    fn css_class(self) -> &'static str {
+        match self {
+            CalloutKind::Dica => "",
+            CalloutKind::Atencao => " warn",
+            CalloutKind::Ok => " ok",
+        }
+    }
+}
+
+/// Tags reconhecidas (inclui a variante acentuada de "atenção" por robustez —
+/// a IA é instruída a usar a forma ASCII, mas pode escorregar).
+const CALLOUT_TAGS: [(CalloutKind, &str, &str); 4] = [
+    (CalloutKind::Dica, "[dica]", "[/dica]"),
+    (CalloutKind::Atencao, "[atencao]", "[/atencao]"),
+    (CalloutKind::Atencao, "[atenção]", "[/atenção]"),
+    (CalloutKind::Ok, "[ok]", "[/ok]"),
+];
+
+enum CalloutChunk<'a> {
+    Text(&'a str),
+    Callout(CalloutKind, &'a str),
+}
+
+/// Split linear por tags de callout, mesmo padrão do `regex_split_sections`.
+/// Tag sem fechamento vira texto cru pra não perder conteúdo.
+fn split_callouts(s: &str) -> Vec<CalloutChunk<'_>> {
+    let mut out = Vec::new();
+    let mut cursor = 0;
+    loop {
+        let next = CALLOUT_TAGS
+            .iter()
+            .filter_map(|(kind, open, close)| {
+                s[cursor..].find(open).map(|p| (cursor + p, *kind, *open, *close))
+            })
+            .min_by_key(|(pos, _, _, _)| *pos);
+        let Some((start, kind, open, close)) = next else { break };
+        if start > cursor {
+            out.push(CalloutChunk::Text(&s[cursor..start]));
+        }
+        let after_open = start + open.len();
+        match s[after_open..].find(close) {
+            Some(end_rel) => {
+                let end = after_open + end_rel;
+                out.push(CalloutChunk::Callout(kind, &s[after_open..end]));
+                cursor = end + close.len();
+            }
+            None => {
+                out.push(CalloutChunk::Text(&s[start..]));
+                cursor = s.len();
+                break;
+            }
+        }
+    }
+    if cursor < s.len() {
+        out.push(CalloutChunk::Text(&s[cursor..]));
+    }
+    out
+}
+
+/// Callout no padrão dos guias: se a primeira linha começa com um rótulo curto
+/// terminado em `:` (até 60 chars), ele vira `<b>`; o restante é renderizado
+/// como parágrafos/listas normais.
+fn render_callout(
+    kind: CalloutKind,
+    content: &str,
+    images: &[(String, String)],
+    used: &mut [bool],
+) -> String {
+    let trimmed = content.trim_matches('\n').trim();
+    if trimmed.is_empty() {
+        return String::new();
+    }
+    let (first, rest) = match trimmed.find("\n\n") {
+        Some(p) => (trimmed[..p].trim(), &trimmed[p + 2..]),
+        None => (trimmed, ""),
+    };
+    let first_line_end = first.find('\n').unwrap_or(first.len());
+    let first_html = match first.find(':') {
+        Some(p) if p > 0 && p <= 60 && p < first_line_end => format!(
+            "          <p><b>{}:</b>{}</p>\n",
+            html_escape(first[..p].trim()),
+            html_escape(&first[p + 1..]).replace('\n', "<br>"),
+        ),
+        _ => format!(
+            "          <p>{}</p>\n",
+            html_escape(first).replace('\n', "<br>")
+        ),
+    };
+    let mut inner = first_html;
+    if !rest.trim().is_empty() {
+        inner.push_str(&render_text_block(rest, images, used));
+    }
+    format!(
+        "        <div class=\"callout{}\">\n{}        </div>\n",
+        kind.css_class(),
+        inner
+    )
+}
+
+/// Corpo de uma seção: texto normal intercalado com callouts `[dica]`,
+/// `[atencao]` e `[ok]`.
+fn text_to_paragraphs_html(text: &str, images: &[(String, String)], used: &mut [bool]) -> String {
+    let mut out = String::new();
+    for chunk in split_callouts(text) {
+        match chunk {
+            CalloutChunk::Text(t) => out.push_str(&render_text_block(t, images, used)),
+            CalloutChunk::Callout(kind, inner) => {
+                out.push_str(&render_callout(kind, inner, images, used))
+            }
+        }
+    }
+    out
+}
+
+/// Parágrafos separados por linha em branco; segmento composto só de linhas
+/// `- item` vira lista `<ul>`; linha `[img N]` vira figura inline e divide o
+/// parágrafo ao redor dela.
+fn render_text_block(text: &str, images: &[(String, String)], used: &mut [bool]) -> String {
     let mut out = String::new();
     for paragraph in text.split("\n\n") {
         let trimmed = paragraph.trim_matches('\n').trim();
         if trimmed.is_empty() {
             continue;
         }
-        let lines: Vec<&str> = trimmed
-            .lines()
-            .map(str::trim)
-            .filter(|l| !l.is_empty())
-            .collect();
-        if !lines.is_empty() && lines.iter().all(|l| l.starts_with("- ")) {
-            out.push_str("        <ul>\n");
-            for l in &lines {
-                out.push_str(&format!("          <li>{}</li>\n", html_escape(l[2..].trim())));
+        let mut segment: Vec<&str> = Vec::new();
+        for line in trimmed.lines().map(str::trim).filter(|l| !l.is_empty()) {
+            match parse_image_marker(line) {
+                Some(n) => {
+                    flush_segment(&mut segment, &mut out);
+                    if let Some((filename, caption)) = images.get(n - 1) {
+                        out.push_str(&figure_html(filename, caption, "        "));
+                        used[n - 1] = true;
+                    }
+                    // Marcador fora do range é descartado (não vira texto)
+                }
+                None => segment.push(line),
             }
-            out.push_str("        </ul>\n");
-        } else {
-            let escaped = html_escape(trimmed).replace('\n', "<br>");
-            out.push_str(&format!("        <p>{}</p>\n", escaped));
         }
+        flush_segment(&mut segment, &mut out);
     }
     out
+}
+
+/// Emite as linhas acumuladas como `<ul>` (se todas forem `- item`) ou `<p>`.
+fn flush_segment(lines: &mut Vec<&str>, out: &mut String) {
+    if lines.is_empty() {
+        return;
+    }
+    if lines.iter().all(|l| l.starts_with("- ")) {
+        out.push_str("        <ul>\n");
+        for l in lines.iter() {
+            out.push_str(&format!("          <li>{}</li>\n", html_escape(l[2..].trim())));
+        }
+        out.push_str("        </ul>\n");
+    } else {
+        let escaped = lines
+            .iter()
+            .map(|l| html_escape(l))
+            .collect::<Vec<_>>()
+            .join("<br>");
+        out.push_str(&format!("        <p>{}</p>\n", escaped));
+    }
+    lines.clear();
 }
 
 /// Versão achatada (h2 + corpo, sem wrappers de card) usada pelos testes pra
@@ -1055,7 +1283,7 @@ fn text_to_paragraphs_html(text: &str) -> String {
 #[cfg(test)]
 fn content_to_html(content: &str) -> String {
     let mut out = String::new();
-    for sec in content_to_sections(content) {
+    for sec in content_to_sections(content, &[], &mut []) {
         if let Some(h) = &sec.heading {
             out.push_str(&format!("    <h2>{}</h2>\n", html_escape(h)));
         }
@@ -1126,18 +1354,26 @@ pub fn seed_vault(target_path: &Path) -> anyhow::Result<Vec<String>> {
 mod tests {
     use super::*;
 
-    fn temp_vault() -> PathBuf {
-        let dir = std::env::temp_dir().join(format!(
-            "artemis_vault_test_{}_{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
-        dir
+    /// Diretório temporário único por teste (tempfile — fix do gotcha 11:
+    /// colisão de nanos entre testes paralelos). Deref pra `Path` mantém os
+    /// call-sites (`dir.join(...)`, `&dir`) inalterados; removido no drop.
+    struct TestDir(tempfile::TempDir);
+
+    impl std::ops::Deref for TestDir {
+        type Target = Path;
+        fn deref(&self) -> &Path {
+            self.0.path()
+        }
+    }
+
+    impl AsRef<Path> for TestDir {
+        fn as_ref(&self) -> &Path {
+            self.0.path()
+        }
+    }
+
+    fn temp_vault() -> TestDir {
+        TestDir(tempfile::TempDir::new().unwrap())
     }
 
     #[test]
@@ -1397,6 +1633,108 @@ mod tests {
         let cartilha_dir = index.parent().unwrap();
         assert!(cartilha_dir.join("imagens/01.png").exists());
         assert!(cartilha_dir.join("imagens/02.jpg").exists());
+    }
+
+    #[test]
+    fn save_cartilha_inlines_marked_images_and_leftovers_go_to_gallery() {
+        let dir = temp_vault();
+        let images = vec![
+            CartilhaImageInput {
+                bytes: b"a",
+                extension: "png",
+                caption: "Tela do menu",
+            },
+            CartilhaImageInput {
+                bytes: b"b",
+                extension: "png",
+                caption: "Imagem extra sem marcador",
+            },
+        ];
+        let index = save_cartilha(
+            &dir,
+            "Imagens espalhadas",
+            "[s]Passo a passo :[/s]\n\nAbra o menu, conforme a imagem 1.\n\n[img 1]\n\nPronto.",
+            None,
+            None,
+            &images,
+        )
+        .unwrap();
+        let html = fs::read_to_string(&index).unwrap();
+
+        // Imagem 1 (marcada) aparece inline na seção, ANTES da galeria
+        let pos_img1 = html.find("imagens/01.png").unwrap();
+        let pos_gallery = html.find("Imagens de referência").unwrap();
+        assert!(pos_img1 < pos_gallery, "imagem marcada deveria vir antes da galeria");
+        // Imagem 2 (sem marcador) cai na galeria de fallback
+        let pos_img2 = html.find("imagens/02.png").unwrap();
+        assert!(pos_img2 > pos_gallery, "imagem sem marcador deveria ir pra galeria");
+        // Imagem 1 não é duplicada na galeria
+        assert_eq!(html.matches("imagens/01.png").count(), 1);
+        // Legendas presentes
+        assert!(html.contains("Tela do menu"));
+        assert!(html.contains("Imagem extra sem marcador"));
+        // Marcador não vaza como texto
+        assert!(!html.contains("[img 1]"));
+    }
+
+    #[test]
+    fn save_cartilha_all_images_marked_omits_gallery() {
+        let dir = temp_vault();
+        let images = vec![CartilhaImageInput {
+            bytes: b"a",
+            extension: "png",
+            caption: "Única imagem",
+        }];
+        let index = save_cartilha(
+            &dir,
+            "Sem galeria",
+            "[s]Objetivo :[/s]\n\nVeja abaixo.\n\n[img 1]",
+            None,
+            None,
+            &images,
+        )
+        .unwrap();
+        let html = fs::read_to_string(&index).unwrap();
+        assert!(html.contains("imagens/01.png"));
+        assert!(!html.contains("Imagens de referência"));
+    }
+
+    #[test]
+    fn callouts_render_with_kind_classes_and_bold_label() {
+        let html = content_to_html(
+            "[s]Observações :[/s]\n\n[atencao]Atenção: cuidado com a filial.[/atencao]\n\n[dica]Dica: use o perfil padrão.[/dica]\n\n[ok]Resultado esperado: botão habilitado.[/ok]",
+        );
+        assert!(html.contains("<div class=\"callout warn\">"));
+        assert!(html.contains("<div class=\"callout\">"));
+        assert!(html.contains("<div class=\"callout ok\">"));
+        // Rótulo até o ':' vira negrito
+        assert!(html.contains("<b>Atenção:</b>"));
+        assert!(html.contains("<b>Dica:</b>"));
+        assert!(html.contains("<b>Resultado esperado:</b>"));
+        // Tags não vazam como texto
+        assert!(!html.contains("[atencao]"));
+        assert!(!html.contains("[/ok]"));
+    }
+
+    #[test]
+    fn callout_without_closing_tag_stays_as_text() {
+        let html = content_to_html("[dica]Sem fechamento");
+        assert!(html.contains("[dica]Sem fechamento"));
+        assert!(!html.contains("<div class=\"callout"));
+    }
+
+    #[test]
+    fn parse_image_marker_variants() {
+        assert_eq!(parse_image_marker("[img 1]"), Some(1));
+        assert_eq!(parse_image_marker("[img1]"), Some(1));
+        assert_eq!(parse_image_marker("[imagem 2]"), Some(2));
+        assert_eq!(parse_image_marker("[IMG 3]"), Some(3));
+        assert_eq!(parse_image_marker("  [img 4]  "), Some(4));
+        // Não é marcador: texto junto, sem número, número zero
+        assert_eq!(parse_image_marker("veja [img 1]"), None);
+        assert_eq!(parse_image_marker("[img]"), None);
+        assert_eq!(parse_image_marker("[img 0]"), None);
+        assert_eq!(parse_image_marker("[img um]"), None);
     }
 
     #[test]

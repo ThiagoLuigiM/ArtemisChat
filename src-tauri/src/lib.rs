@@ -200,6 +200,7 @@ pub fn run() {
             commands::apply_phrase_templates,
             commands::stream_cartilha,
             commands::save_cartilha,
+            commands::preview_cartilha,
             commands::open_in_system,
             commands::suggest_test_scenarios,
             commands::get_autostart_enabled,

@@ -291,8 +291,10 @@ pub async fn analyze_edits(
 /// `audience` aceita "suporte", "cliente" ou "interno". Default razoável para
 /// valores desconhecidos: "suporte".
 ///
-/// `image_captions` é apenas informativa pra IA mencionar "ver imagem N" onde
-/// apropriado; o renderer HTML coloca todas as imagens numa galeria no fim.
+/// `image_captions` informa a IA sobre as imagens anexadas para ela posicionar
+/// cada uma no contexto certo via marcador `[img N]` (linha própria); o renderer
+/// HTML substitui o marcador pela figura. Imagens sem marcador caem numa
+/// galeria de fallback no fim do documento.
 pub fn build_cartilha_messages(
     form_input: &str,
     audience: &str,
@@ -311,7 +313,7 @@ pub fn build_cartilha_messages(
         for (i, cap) in image_captions.iter().enumerate() {
             s.push_str(&format!("- Imagem {}: {}\n", i + 1, cap));
         }
-        s.push_str("\nCite cada imagem onde for relevante no texto (ex: \"conforme a imagem 1\"). Todas serão renderizadas numa galeria no fim do documento.");
+        s.push_str("\nPOSICIONE cada imagem no ponto do texto que ela ilustra: insira o marcador `[img N]` SOZINHO numa linha, logo após o parágrafo ou passo correspondente (ex: `[img 1]`). Use cada imagem no máximo UMA vez e não invente números além da lista acima. Você pode citar a imagem no texto (ex: \"conforme a imagem 1\"). Imagens sem marcador aparecem automaticamente numa galeria no fim do documento.");
         s
     };
 
@@ -325,7 +327,12 @@ pub fn build_cartilha_messages(
         - O que mudou (resumo do delta)\n\
         - Pré-requisitos (versão mínima, permissões necessárias)\n\
         - Passo a passo (instruções numeradas ou em prosa)\n\
-        - Observações (cuidados, limitações, dicas){images_hint}\n\n\
+        - Observações (cuidados, limitações, dicas)\n\n\
+        CAIXAS DE DESTAQUE (use com moderação, no máximo 3 por cartilha):\n\
+        - `[dica]Dica: texto[/dica]` → caixa azul de informação/dica\n\
+        - `[atencao]Atenção: texto[/atencao]` → caixa amarela de cuidado/limitação\n\
+        - `[ok]Resultado esperado: texto[/ok]` → caixa verde de confirmação de sucesso\n\
+        Comece o conteúdo da caixa com um rótulo curto seguido de dois-pontos (vira negrito no HTML).{images_hint}\n\n\
         REGRAS:\n\
         - NÃO use markdown (`#`, `**`, `*`). Exceção: linhas iniciadas com `- ` viram bullets no HTML final — use-as para enumerações e checklists.\n\
         - NÃO use as tags `[n]...[/n]` (essas são da devolutiva N1, formato diferente).\n\

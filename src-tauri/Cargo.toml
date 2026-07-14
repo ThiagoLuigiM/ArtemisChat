@@ -50,6 +50,14 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 # Paths
 dirs = "5"
 
+# DPAPI (CryptProtectData) para cifrar a API key no config.json
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.59", features = ["Win32_Foundation", "Win32_Security_Cryptography"] }
+
+[dev-dependencies]
+# Diretórios temporários únicos por teste (fix da flakiness — gotcha 11)
+tempfile = "3"
+
 [profile.release]
 opt-level = "s"
 lto = true

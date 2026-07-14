@@ -262,17 +262,13 @@ mod tests {
     use super::*;
 
     fn temp_history() -> History {
-        let dir = std::env::temp_dir().join(format!(
-            "artemis_test_{}_{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
-        History::open(&dir.join("test.db")).unwrap()
+        // tempfile garante diretório único por teste (fix do gotcha 11).
+        // `forget` impede o drop de apagar o dir enquanto o .db está aberto —
+        // %TEMP% é limpo pelo SO, mesmo comportamento do helper antigo.
+        let dir = tempfile::TempDir::new().unwrap();
+        let history = History::open(&dir.path().join("test.db")).unwrap();
+        std::mem::forget(dir);
+        history
     }
 
     #[test]

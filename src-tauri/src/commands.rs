@@ -135,6 +135,39 @@ pub fn save_cartilha(
     Ok(index.to_string_lossy().into_owned())
 }
 
+/// Renderiza a cartilha numa pasta temporária (fora do vault) pro usuário
+/// pré-visualizar o HTML final no navegador antes de salvar. Não exige vault
+/// configurado; a pasta de preview é recriada a cada chamada.
+#[tauri::command]
+pub fn preview_cartilha(
+    title: String,
+    content: String,
+    release: Option<String>,
+    author: Option<String>,
+    images: Vec<CartilhaImageDto>,
+) -> Result<String, String> {
+    let image_inputs: Vec<vault::CartilhaImageInput> = images
+        .iter()
+        .map(|img| vault::CartilhaImageInput {
+            bytes: &img.bytes,
+            extension: &img.extension,
+            caption: &img.caption,
+        })
+        .collect();
+
+    let index = vault::preview_cartilha(
+        &title,
+        &content,
+        release.as_deref(),
+        author.as_deref(),
+        &image_inputs,
+    )
+    .map_err(|e| e.to_string())?;
+
+    tracing::info!("preview de cartilha gerado: {}", index.display());
+    Ok(index.to_string_lossy().into_owned())
+}
+
 // ───────────────────────────────────────────────────────────────────────────────
 // Form de testes (#23) — sugestões de cenários via IA + compilação do texto final
 // ───────────────────────────────────────────────────────────────────────────────

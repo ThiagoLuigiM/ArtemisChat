@@ -111,7 +111,7 @@ DevReturn/                            ← pasta raiz (nome legado, não renomead
 - `exemplos-{categoria}.md` — auto-curados pela aprovação. Categorias são descobertas pela IA (sem lista fixa). Exemplos: `exemplos-fiscal.md`, `exemplos-vendas.md`, `exemplos-promocao.md`.
 
 **Arquivos em `%APPDATA%/Artemis/`:**
-- `config.json` — `{ vault_path, api_key }` (plaintext — vide gotcha keyring)
+- `config.json` — `{ vault_path, api_key_enc }`. Desde 2026-07-14 a API key é cifrada com **DPAPI** (`CryptProtectData` via `windows-sys`, escopo current-user, blob em hex). O campo legado `api_key` (plaintext) é migrado automaticamente na primeira leitura e removido do arquivo. `save_api_key` faz roundtrip verify (cifra → decifra → compara) antes de persistir — lição do gotcha 1
 - `history.db` — SQLite com a tabela `entries` + FTS5
 
 ## Comandos Tauri expostos
@@ -146,6 +146,7 @@ DevReturn/                            ← pasta raiz (nome legado, não renomead
 | `apply_phrase_templates` | `templates: Vec<PhraseTemplate>` | `String` (nome do arquivo escrito) | Faz backup em `campos-padrao.md.bak`; appenda templates aceitos na seção "Frases-modelo aprovadas" (formato `**<situation>:**\n> <template>`) sob marker; recarrega vault |
 | `stream_cartilha` | `form_input, audience, image_captions` | — | Stream da geração de cartilha didática via DeepSeek; emite events `cartilha-token` / `cartilha-done` (separados dos da devolutiva pra UI não confundir) |
 | `save_cartilha` | `title, content, release?, author?, images: Vec<CartilhaImageDto>` | `String` (path do `index.html`) | Cria `vault/cartilhas/YYYY-MM-DD-<slug>/index.html` + `imagens/NN.ext`. HTML self-contained (CSS inline). Imagens chegam como `Vec<u8>` direto, sem precisar base64 |
+| `preview_cartilha` | `title, content, release?, author?, images: Vec<CartilhaImageDto>` | `String` (path do `index.html`) | Renderiza o mesmo bundle numa pasta temporária FIXA (`%TEMP%/artemis-cartilha-preview/`, recriada a cada chamada), fora do vault, pro usuário conferir o HTML no navegador antes de salvar. Não exige vault configurado |
 | `open_in_system` | `path: String` | — | Abre arquivo/pasta no app padrão do sistema (Windows: `cmd /c start`). Usado pra abrir cartilha gerada no navegador |
 | `suggest_test_scenarios` | `form_input: String` | `TestScenariosSuggestion { happy_path, edge_cases, negative_cases, acceptance_criteria, regression_areas, risks }` | Pede à IA pra preencher cenários do form de testes a partir do contexto do FormView. JSON puro, parser via `extract_json_object`. Frontend pré-preenche os textareas |
 | `get_autostart_enabled` | — | `bool` | Lê do registro do Windows se o app está configurado pra iniciar com o sistema |
@@ -478,9 +479,11 @@ Geração automatizada de cartilhas a partir do mesmo input do FormView, com ima
 - Stream em `<pre>` durante geração; `<textarea>` editável depois pra usuário ajustar antes de salvar.
 - Após salvar: botão "Abrir no navegador" via `open_in_system`.
 
-**Template HTML:** CSS inline (variáveis CSS pra tema), header com título+release+data+autor, conteúdo em `<main>`, galeria de imagens em `<figure>+<figcaption>` no fim, footer com referência ao Artemis, media query `@media print` para impressão.
+**Template HTML (reformulado 2026-07-14):** segue o padrão visual dos guias oficiais do WorkSpaceConciliacao (`guia-usuario-conciliacao.html` / `manual-n3-consultas-alteracoes.html`): sidebar azul `#072b73` sticky com índice ancorado nas seções, hero em gradiente com chips de metadados (Release/data/autor), cada `[s]...[/s]` vira card branco `<section id=slug>`, screenshots com barra de legenda (`.screenshot`/`.caption`), fonte Segoe UI, media queries responsiva (980px) e print. CSS num `const CARTILHA_CSS` (sem escaping de braces no `format!`). Parágrafos só de linhas `- item` viram `<ul>` reais.
 
-**Tests:** 5 testes em `vault.rs` cobrindo `save_cartilha` (cria pasta+imagens+HTML, rejeita título/conteúdo vazios, slug truncado/sanitizado) e `content_to_html` (seções+parágrafos, escape XSS, tag não fechada).
+**Imagens inline (2026-07-14):** a IA posiciona cada imagem no contexto via marcador `[img N]` em linha própria (aceita `[img1]`/`[imagem 1]`, case-insensitive — `parse_image_marker`); o renderer substitui pela figura inline dentro da seção. Imagens sem marcador caem numa galeria de fallback "Imagens de referência" no fim (omitida se todas forem usadas). Marcador com número inválido é descartado. Vale para os 3 audiences (instrução na parte compartilhada do prompt).
+
+**Tests:** 8 testes em `vault.rs` cobrindo `save_cartilha` (cria pasta+imagens+HTML, rejeita título/conteúdo vazios, slug truncado/sanitizado, imagem marcada inline antes da galeria sem duplicar, galeria omitida quando todas usadas), `content_to_html` (seções+parágrafos, escape XSS, tag não fechada) e `parse_image_marker` (variantes válidas/inválidas). ⚠️ Máquina atual (C:\Space) não tem toolchain Rust — testes precisam rodar no CI ou na máquina com cargo.
 
 ### ✅ #23 — Formulário de testes para QA (concluída 2026-05-23)
 Form complementar pra dev mandar pra equipe de testes; estrutura definida pelo Artemis (a equipe não forneceu diretriz).
@@ -504,10 +507,19 @@ Form complementar pra dev mandar pra equipe de testes; estrutura definida pelo A
 
 **Decisão deliberada:** sem persistência SQLite nesta versão. O form é descartável após copiar pro ticket. Se equipe QA pedir histórico depois, adicionar coluna `test_form: Option<String>` na `entries` é trivial (migration idempotente já tem padrão estabelecido).
 
+### ✅ Template da cartilha no padrão dos guias + imagens inline (concluída 2026-07-14)
+Reformulação do `render_cartilha_html` (vide seção #22 acima): layout sidebar+hero+cards igual aos guias do WorkSpaceConciliacao, e imagens espalhadas pelo documento via marcador `[img N]` gerado pela IA (galeria só como fallback). Mudanças em `vault.rs` (template, `content_to_sections`, `parse_image_marker`, `figure_html`, `flush_segment`) e `deepseek.rs` (prompt instrui posicionamento das imagens + listas `- `). Nenhuma mudança de frontend, comando ou evento.
+
+### ✅ Rodada de melhorias aprovadas pelo usuário (concluída 2026-07-14)
+Quatro itens aprovados via lista de propostas:
+1. **Callouts na cartilha** — tags `[dica]`/`[atencao]`/`[ok]` viram caixas de destaque azul/amarela/verde no padrão dos guias (`.callout`/`.callout.warn`/`.callout.ok`). Rótulo inicial até `:` (≤60 chars na primeira linha) vira `<b>`. Parser `split_callouts` (varredura linear, mesmo padrão do `regex_split_sections`; aceita `[atenção]` acentuado; tag sem fechamento vira texto cru). Prompt instrui uso moderado (máx. 3).
+2. **Pré-visualizar cartilha** — botão "Pré-visualizar" no CartilhaView; comando `preview_cartilha` + refactor `write_cartilha_bundle` compartilhado com `save_cartilha`.
+3. **Flakiness dos testes corrigida (gotcha 11)** — `tempfile = "3"` em dev-dependencies; `temp_vault()` retorna wrapper `TestDir(TempDir)` com `Deref<Target=Path>`+`AsRef<Path>` (call-sites inalterados, cleanup no drop); `temp_history()` usa `TempDir` + `mem::forget` (o .db fica aberto durante o teste).
+4. **API key cifrada com DPAPI** — vide seção de arquivos `%APPDATA%` acima. Dep nova: `windows-sys 0.59` (features `Win32_Foundation` + `Win32_Security_Cryptography`), só em `cfg(windows)`; fallback pass-through em outras plataformas pra compilar. 3 testes novos em `settings.rs` (hex roundtrip, hex inválido, dpapi roundtrip) + 2 de callout em `vault.rs`.
+
 ### ⏳ Próximas fases pendentes
-- **Configurabilidade de hotkey** — UI de captura + persistência em config.json + re-registro dinâmico do global shortcut
-- **Cifrar API key com DPAPI** — substituir plaintext em `config.json` por `CryptProtectData` escopo current-user (vide gotcha #1)
-- **Imagens inline na cartilha (opcional)** — hoje todas vão pra galeria no fim. Próxima iteração: IA gera placeholders `[img:01]` no texto e renderer substitui por `<figure>` inline
+- **Configurabilidade de hotkey** — UI de captura + persistência em config.json + re-registro dinâmico do global shortcut (proposto na rodada 2026-07-14, não aprovado ainda)
+- **Passos numerados estilizados e tabelas na cartilha** — componentes `.steps` e `.table-wrap` dos guias (propostos na rodada 2026-07-14, não aprovados ainda)
 
 ## Próximo passo imediato (status 2026-05-23 sessão 7)
 
@@ -602,8 +614,8 @@ Se um comando retorna `Result<MyStruct, String>`, então `MyStruct` precisa ser 
 ### 10. Tauri dev watcher detecta Cargo.toml mas pode demorar
 Mudanças em `src-tauri/Cargo.toml` (ex: adicionar `rusqlite`) disparam rebuild via Tauri's cargo watcher, MAS demoram mais que mudanças em `.rs` (precisa baixar/compilar a nova dep). Primeira compilação de `rusqlite bundled` leva ~3-5 min (compila SQLite em C). Subsequentes são cached.
 
-### 11. Flakiness em `temp_history()` / `temp_vault()` dos testes
-Helpers de teste criam diretório com `SystemTime::now().as_nanos() + process_id()`. Cargo roda testes em paralelo por default — colisão de nanos entre 2 testes simultâneos faz eles compartilharem o mesmo DB, contaminando resultados (já vi `count_approved_unedited_matches_list` esperar 2 e receber 5 numa run, depois passar na re-run sem mudança). Workaround: re-rodar `cargo test --lib`. Fix proposto (chip): trocar para `tempfile::TempDir`.
+### 11. Flakiness em `temp_history()` / `temp_vault()` dos testes — ✅ CORRIGIDO 2026-07-14
+Helpers de teste criavam diretório com `SystemTime::now().as_nanos() + process_id()`. Cargo roda testes em paralelo por default — colisão de nanos entre 2 testes simultâneos fazia eles compartilharem o mesmo DB, contaminando resultados. **Fix aplicado:** `tempfile::TempDir` (nomes aleatórios, sem colisão). `temp_vault()` devolve wrapper `TestDir` com Deref pra `Path`; `temp_history()` usa `mem::forget` pra manter o dir vivo enquanto o `.db` está aberto.
 
 ## Validação de qualidade de código
 
@@ -634,4 +646,6 @@ Em `C:\Users\Borge\.claude\projects\E--Projetos-Thiago-Space-WorkSpaceArtemis\me
 
 ---
 
-**Última atividade:** Sessão Claude Opus 4.7 (sétima continuação) em 2026-05-23 BRT. Entregues nesta sessão: **#22 (cartilha HTML didática)** e **#23 (form de testes pra QA)**. Cartilha: `deepseek::build_cartilha_messages` constrói prompt com audience configurável (suporte/cliente/interno), stream via eventos `cartilha-token`/`cartilha-done`; `vault::save_cartilha` cria `cartilhas/YYYY-MM-DD-<slug>/index.html` + subpasta `imagens/`, template HTML self-contained com CSS inline; UI `CartilhaView` suporta paste (Ctrl+V) + drag-and-drop + file picker pra imagens, com heurística `cartilhaImagesRequired` que obriga imagens quando há `parametro` preenchido ou palavras-chave de fluxo no `correcao`. Form de testes: `deepseek::suggest_test_scenarios` retorna `TestScenariosSuggestion` JSON; novo parser `extract_json_object` análogo ao `extract_json_array`; UI `TestesView` com 6 seções (Identificação/Pré-req/Cenários/Regressão/Riscos), prefill do FormView, "Sugerir com IA", "Gerar e copiar" usando tags `[n]...[/n]`. FormView ganhou 3 botões na footer (Cartilha · Form testes · Devolutiva N1). 59/59 testes (+10 novos: 5 cartilha + 5 deepseek/extract_json_object), `cargo check` 0 warnings, `tsc --noEmit` 0 erros. Decisão: cartilha salva no vault (artefato histórico); form de testes só vai pro clipboard (descartável). Plus: novo comando `open_in_system` (sem plugin extra — usa `cmd /c start`) pra abrir cartilha no navegador padrão.
+**Última atividade:** Sessão Claude Fable 5 em 2026-07-14 BRT (máquina C:\Space\Artemis\ArtemisChat, **sem toolchain Rust local** — validação via port Node da lógica + browser + `tsc --noEmit` (0 erros); `cargo check`/`cargo test` pendentes no CI/máquina com cargo, **incluindo o FFI do DPAPI via windows-sys que não pôde ser compile-verificado localmente**). Entregues em 3 rodadas: (1) template da cartilha HTML reformulado no padrão dos guias oficiais do WorkSpaceConciliacao (sidebar azul com índice, hero com chips, seções em cards, screenshots com legenda, listas `- ` viram `<ul>`); (2) imagens posicionadas inline no contexto via marcador `[img N]` gerado pela IA (galeria de fallback só para não marcadas); (3) rodada de melhorias aprovadas: callouts `[dica]`/`[atencao]`/`[ok]`, botão Pré-visualizar (comando `preview_cartilha`), fix da flakiness dos testes (tempfile) e API key cifrada com DPAPI (migração transparente do plaintext). Arquivos: `vault.rs`, `deepseek.rs`, `commands.rs`, `lib.rs`, `settings.rs`, `history.rs`, `Cargo.toml` (+`windows-sys`, +`tempfile` dev), `ChatWindow.tsx`. HANDOFF anterior abaixo:
+
+**Atividade anterior:** Sessão Claude Opus 4.7 (sétima continuação) em 2026-05-23 BRT. Entregues nesta sessão: **#22 (cartilha HTML didática)** e **#23 (form de testes pra QA)**. Cartilha: `deepseek::build_cartilha_messages` constrói prompt com audience configurável (suporte/cliente/interno), stream via eventos `cartilha-token`/`cartilha-done`; `vault::save_cartilha` cria `cartilhas/YYYY-MM-DD-<slug>/index.html` + subpasta `imagens/`, template HTML self-contained com CSS inline; UI `CartilhaView` suporta paste (Ctrl+V) + drag-and-drop + file picker pra imagens, com heurística `cartilhaImagesRequired` que obriga imagens quando há `parametro` preenchido ou palavras-chave de fluxo no `correcao`. Form de testes: `deepseek::suggest_test_scenarios` retorna `TestScenariosSuggestion` JSON; novo parser `extract_json_object` análogo ao `extract_json_array`; UI `TestesView` com 6 seções (Identificação/Pré-req/Cenários/Regressão/Riscos), prefill do FormView, "Sugerir com IA", "Gerar e copiar" usando tags `[n]...[/n]`. FormView ganhou 3 botões na footer (Cartilha · Form testes · Devolutiva N1). 59/59 testes (+10 novos: 5 cartilha + 5 deepseek/extract_json_object), `cargo check` 0 warnings, `tsc --noEmit` 0 erros. Decisão: cartilha salva no vault (artefato histórico); form de testes só vai pro clipboard (descartável). Plus: novo comando `open_in_system` (sem plugin extra — usa `cmd /c start`) pra abrir cartilha no navegador padrão.
