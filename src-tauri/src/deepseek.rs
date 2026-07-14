@@ -327,7 +327,7 @@ pub fn build_cartilha_messages(
         - Passo a passo (instruções numeradas ou em prosa)\n\
         - Observações (cuidados, limitações, dicas){images_hint}\n\n\
         REGRAS:\n\
-        - NÃO use markdown (`#`, `**`, `*`, listas com `-` no início de linha funcionam se você quiser destaque, mas SEM hashes).\n\
+        - NÃO use markdown (`#`, `**`, `*`). Exceção: linhas iniciadas com `- ` viram bullets no HTML final — use-as para enumerações e checklists.\n\
         - NÃO use as tags `[n]...[/n]` (essas são da devolutiva N1, formato diferente).\n\
         - Frases curtas, voz ativa, tom direto mas amigável.\n\
         - Se o input mencionar nova permissão/parâmetro/caminho, dedique uma seção a explicar passo a passo onde encontrar.\n\

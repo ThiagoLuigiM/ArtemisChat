@@ -633,9 +633,215 @@ fn html_escape(s: &str) -> String {
         .replace('"', "&quot;")
 }
 
-/// Renderiza o HTML self-contained da cartilha. CSS inline, nenhum link externo,
-/// imagens via path relativo `imagens/NN.ext`. Funciona aberto no browser ou
-/// indexado pelo Obsidian via plugin de HTML embed.
+/// CSS do template da cartilha — segue o padrão visual dos guias oficiais
+/// (ex.: guia-usuario-conciliacao.html): sidebar azul fixa com índice, hero em
+/// gradiente com chips de metadados, seções em cards brancos e screenshots com
+/// barra de legenda. Self-contained: nenhuma dependência externa.
+const CARTILHA_CSS: &str = r#"    :root {
+      --azul: #072b73;
+      --azul-2: #08388f;
+      --azul-claro: #eef4ff;
+      --texto: #1f2937;
+      --muted: #64748b;
+      --borda: #d8e1ec;
+      --fundo: #f4f7fb;
+      --card: #ffffff;
+      --shadow: 0 16px 40px rgba(15, 23, 42, .10);
+      --radius: 8px;
+      --font: "Segoe UI", Arial, sans-serif;
+    }
+
+    * { box-sizing: border-box; }
+    html { scroll-behavior: smooth; }
+    body {
+      margin: 0;
+      background: var(--fundo);
+      color: var(--texto);
+      font-family: var(--font);
+      font-size: 16px;
+      line-height: 1.6;
+    }
+
+    a { color: inherit; text-decoration: none; }
+    p { margin: 0 0 12px; }
+    ul, ol { margin: 10px 0 12px; padding-left: 22px; }
+    li { margin: 6px 0; }
+    b { color: #111827; }
+
+    .layout {
+      display: grid;
+      grid-template-columns: 286px minmax(0, 1fr);
+      min-height: 100vh;
+    }
+
+    aside {
+      position: sticky;
+      top: 0;
+      height: 100vh;
+      overflow: auto;
+      padding: 24px 18px;
+      color: #fff;
+      background: var(--azul);
+      border-right: 1px solid rgba(255,255,255,.14);
+    }
+
+    .brand {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      padding-bottom: 18px;
+      margin-bottom: 18px;
+      border-bottom: 1px solid rgba(255,255,255,.18);
+    }
+
+    .brand .badge {
+      display: grid;
+      place-items: center;
+      width: 48px;
+      height: 48px;
+      border-radius: 8px;
+      background: #fff;
+      color: var(--azul);
+      font-size: 24px;
+      font-weight: 700;
+    }
+
+    .brand strong { display: block; font-size: 16px; line-height: 1.2; }
+    .brand span { display: block; margin-top: 4px; color: #bed3ff; font-size: 12px; }
+
+    nav h2 {
+      margin: 22px 0 8px;
+      color: #a9c2ff;
+      font-size: 11px;
+      letter-spacing: .08em;
+      text-transform: uppercase;
+    }
+
+    nav a {
+      display: block;
+      padding: 8px 10px;
+      border-radius: 6px;
+      color: #f4f7ff;
+      font-size: 14px;
+    }
+
+    nav a:hover { background: rgba(255,255,255,.12); }
+
+    main {
+      width: 100%;
+      max-width: 1220px;
+      padding: 34px 44px 78px;
+    }
+
+    .hero {
+      padding: 44px;
+      border-radius: var(--radius);
+      color: #fff;
+      background:
+        linear-gradient(110deg, rgba(7,43,115,.96), rgba(8,56,143,.88) 58%, rgba(23,107,135,.72)),
+        linear-gradient(135deg, #072b73, #176b87);
+      box-shadow: var(--shadow);
+    }
+
+    .hero h1 {
+      max-width: 860px;
+      margin: 0;
+      font-size: clamp(32px, 4.5vw, 52px);
+      line-height: 1.05;
+    }
+
+    .chips {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 10px;
+      margin-top: 24px;
+    }
+
+    .chip {
+      display: inline-flex;
+      align-items: center;
+      min-height: 31px;
+      padding: 5px 11px;
+      border: 1px solid rgba(255,255,255,.28);
+      border-radius: 999px;
+      background: rgba(255,255,255,.10);
+      color: #fff;
+      font-size: 13px;
+    }
+
+    section {
+      margin-top: 34px;
+      padding: 30px;
+      border: 1px solid var(--borda);
+      border-radius: var(--radius);
+      background: var(--card);
+      box-shadow: 0 4px 14px rgba(15, 23, 42, .04);
+    }
+
+    section h2 {
+      margin: 0 0 12px;
+      color: var(--azul);
+      font-size: 28px;
+      line-height: 1.22;
+    }
+
+    .screenshot {
+      margin: 20px 0 8px;
+      border: 1px solid #cbd7e6;
+      border-radius: var(--radius);
+      overflow: hidden;
+      background: #fff;
+      box-shadow: var(--shadow);
+    }
+
+    .screenshot img {
+      display: block;
+      width: 100%;
+      height: auto;
+    }
+
+    .caption {
+      margin: 0;
+      padding: 10px 14px;
+      border-top: 1px solid var(--borda);
+      color: var(--muted);
+      background: #f8fafc;
+      font-size: 13px;
+    }
+
+    footer {
+      padding: 24px 0 0;
+      color: var(--muted);
+      font-size: 13px;
+    }
+
+    @media (max-width: 980px) {
+      .layout { grid-template-columns: 1fr; }
+      aside { position: static; height: auto; }
+      main { padding: 20px 14px 58px; }
+      .hero { padding: 28px 22px; }
+      section { padding: 22px 16px; }
+    }
+
+    @media print {
+      aside { display: none; }
+      .layout { display: block; }
+      main { max-width: none; padding: 0; }
+      .hero, section, .screenshot { box-shadow: none; break-inside: avoid; }
+      body { background: #fff; }
+    }"#;
+
+/// Rótulo do índice lateral: título da seção sem o " :" decorativo do fim.
+fn nav_label(heading: &str) -> String {
+    heading.trim().trim_end_matches(':').trim().to_string()
+}
+
+/// Renderiza o HTML self-contained da cartilha no padrão dos guias oficiais:
+/// sidebar com índice ancorado nas seções, hero com título + chips (release,
+/// data, autor), cada seção `[s]...[/s]` vira um card `<section id=...>` e as
+/// imagens entram numa seção final de screenshots com legenda. Imagens via
+/// path relativo `imagens/NN.ext`. Funciona aberto no browser ou indexado
+/// pelo Obsidian via plugin de HTML embed.
 fn render_cartilha_html(
     title: &str,
     content: &str,
@@ -644,38 +850,68 @@ fn render_cartilha_html(
     date_display: &str,
     image_files: &[(String, String)],
 ) -> String {
-    // Converte tags [s]Título :[/s] em <h2>; quebras duplas em </p><p>; texto cru em <p>.
-    let body_html = content_to_html(content);
+    let sections = content_to_sections(content);
+
+    let mut nav_links = String::new();
+    let mut sections_html = String::new();
+    for sec in &sections {
+        match &sec.heading {
+            Some(h) => {
+                nav_links.push_str(&format!(
+                    "        <a href=\"#{id}\">{label}</a>\n",
+                    id = sec.id,
+                    label = html_escape(&nav_label(h)),
+                ));
+                sections_html.push_str(&format!(
+                    "      <section id=\"{id}\">\n        <h2>{h}</h2>\n{body}      </section>\n",
+                    id = sec.id,
+                    h = html_escape(h),
+                    body = sec.body_html,
+                ));
+            }
+            None => {
+                sections_html.push_str(&format!(
+                    "      <section>\n{body}      </section>\n",
+                    body = sec.body_html,
+                ));
+            }
+        }
+    }
 
     let mut gallery = String::new();
     if !image_files.is_empty() {
-        gallery.push_str("\n  <section class=\"gallery\">\n    <h2>Imagens de referência</h2>\n");
+        nav_links.push_str("        <a href=\"#imagens-referencia\">Imagens de referência</a>\n");
+        gallery.push_str("      <section id=\"imagens-referencia\">\n        <h2>Imagens de referência</h2>\n");
         for (filename, caption) in image_files {
             gallery.push_str(&format!(
-                "    <figure>\n      <img src=\"imagens/{}\" alt=\"{}\" loading=\"lazy\">\n      <figcaption>{}</figcaption>\n    </figure>\n",
+                "        <figure class=\"screenshot\">\n          <img src=\"imagens/{}\" alt=\"{}\" loading=\"lazy\">\n          <figcaption class=\"caption\">{}</figcaption>\n        </figure>\n",
                 html_escape(filename),
                 html_escape(caption),
                 html_escape(caption)
             ));
         }
-        gallery.push_str("  </section>\n");
+        gallery.push_str("      </section>\n");
     }
 
-    let mut meta_parts: Vec<String> = Vec::new();
+    let mut chips = String::new();
     if !release.trim().is_empty() {
-        meta_parts.push(format!("Release {}", html_escape(release.trim())));
+        chips.push_str(&format!(
+            "            <span class=\"chip\">Release {}</span>\n",
+            html_escape(release.trim())
+        ));
     }
     if !date_display.is_empty() {
-        meta_parts.push(html_escape(date_display));
+        chips.push_str(&format!(
+            "            <span class=\"chip\">Atualizado em {}</span>\n",
+            html_escape(date_display)
+        ));
     }
     if !author.trim().is_empty() {
-        meta_parts.push(html_escape(author.trim()));
+        chips.push_str(&format!(
+            "            <span class=\"chip\">{}</span>\n",
+            html_escape(author.trim())
+        ));
     }
-    let meta_line = if meta_parts.is_empty() {
-        String::new()
-    } else {
-        format!("    <p class=\"meta\">{}</p>\n", meta_parts.join(" · "))
-    };
 
     format!(
         r#"<!DOCTYPE html>
@@ -685,148 +921,146 @@ fn render_cartilha_html(
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>{title_esc}</title>
   <style>
-    :root {{
-      --fg: #1c1c1f;
-      --muted: #6c6c74;
-      --accent: #4848e0;
-      --bg: #ffffff;
-      --bg-alt: #f7f7fa;
-      --border: #e5e5ea;
-    }}
-    * {{ box-sizing: border-box; }}
-    body {{
-      margin: 0;
-      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
-      color: var(--fg);
-      background: var(--bg);
-      line-height: 1.6;
-      font-size: 16px;
-    }}
-    main {{
-      max-width: 760px;
-      margin: 0 auto;
-      padding: 32px 24px 64px;
-    }}
-    header {{
-      border-bottom: 1px solid var(--border);
-      padding-bottom: 20px;
-      margin-bottom: 32px;
-    }}
-    header h1 {{
-      margin: 0 0 8px;
-      font-size: 28px;
-      letter-spacing: -0.01em;
-    }}
-    .meta {{
-      margin: 0;
-      color: var(--muted);
-      font-size: 13px;
-    }}
-    h2 {{
-      margin: 32px 0 12px;
-      font-size: 19px;
-      color: var(--accent);
-      letter-spacing: 0.01em;
-    }}
-    p {{ margin: 0 0 14px; }}
-    figure {{
-      margin: 20px 0;
-      padding: 12px;
-      background: var(--bg-alt);
-      border: 1px solid var(--border);
-      border-radius: 8px;
-    }}
-    figure img {{
-      display: block;
-      max-width: 100%;
-      height: auto;
-      border-radius: 4px;
-    }}
-    figcaption {{
-      margin-top: 8px;
-      font-size: 13px;
-      color: var(--muted);
-      text-align: center;
-    }}
-    footer {{
-      margin-top: 48px;
-      padding-top: 16px;
-      border-top: 1px solid var(--border);
-      color: var(--muted);
-      font-size: 12px;
-      text-align: center;
-    }}
-    @media print {{
-      body {{ font-size: 12pt; }}
-      h2 {{ break-after: avoid; }}
-      figure {{ break-inside: avoid; }}
-    }}
+{css}
   </style>
 </head>
 <body>
-  <main>
-    <header>
-      <h1>{title_esc}</h1>
-{meta}    </header>
-{body}{gallery}    <footer>Cartilha gerada pelo Artemis em {date_esc}</footer>
-  </main>
+  <div class="layout">
+    <aside>
+      <div class="brand">
+        <div class="badge">A</div>
+        <div>
+          <strong>Artemis</strong>
+          <span>Cartilha didática</span>
+        </div>
+      </div>
+      <nav aria-label="Índice da cartilha">
+        <h2>Conteúdo</h2>
+{nav}      </nav>
+    </aside>
+    <main>
+      <header class="hero">
+        <div>
+          <h1>{title_esc}</h1>
+          <div class="chips">
+{chips}          </div>
+        </div>
+      </header>
+{sections}{gallery}      <footer>
+        <p>Cartilha gerada pelo Artemis em {date_esc}.</p>
+      </footer>
+    </main>
+  </div>
 </body>
 </html>
 "#,
         title_esc = html_escape(title),
-        meta = meta_line,
-        body = body_html,
+        css = CARTILHA_CSS,
+        nav = nav_links,
+        chips = chips,
+        sections = sections_html,
         gallery = gallery,
         date_esc = html_escape(date_display),
     )
 }
 
-/// Converte o texto bruto da IA em HTML estruturado:
-/// - `[s]Título :[/s]` → `<h2>Título :</h2>` (mesmo padrão do `[n]` da devolutiva,
+/// Seção lógica da cartilha: uma tag `[s]Título :[/s]` + o texto até a próxima
+/// tag. Texto antes da primeira tag vira uma seção sem heading (sem entrada no
+/// índice lateral). O `id` alimenta a âncora `<section id>` + link da sidebar.
+struct CartilhaSection {
+    id: String,
+    heading: Option<String>,
+    body_html: String,
+}
+
+fn make_section(heading: Option<String>, body_html: String, index: usize) -> CartilhaSection {
+    let id = heading
+        .as_deref()
+        .map(crate::deepseek::slugify_category)
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| format!("secao-{}", index + 1));
+    CartilhaSection { id, heading, body_html }
+}
+
+/// Converte o texto bruto da IA em seções estruturadas:
+/// - `[s]Título :[/s]` abre uma nova seção (mesmo padrão do `[n]` da devolutiva,
 ///   mas com `s` de "section" pra diferenciar)
 /// - Quebras de linha duplas → novo parágrafo
-/// - Quebras simples dentro de parágrafo → `<br>` (preserva listas/passos)
-fn content_to_html(content: &str) -> String {
-    let mut out = String::with_capacity(content.len() * 2);
-    let mut buf = String::new();
-    let mut in_para = false;
+/// - Parágrafo só de linhas `- item` → `<ul><li>`
+/// - Quebras simples dentro de parágrafo → `<br>` (preserva passos numerados)
+fn content_to_sections(content: &str) -> Vec<CartilhaSection> {
+    let mut sections: Vec<CartilhaSection> = Vec::new();
+    let mut heading: Option<String> = None;
+    let mut body = String::new();
 
-    let flush_para = |buf: &mut String, out: &mut String, in_para: &mut bool| {
-        if *in_para {
-            let text = std::mem::take(buf);
-            let text = text.trim();
-            if !text.is_empty() {
-                let escaped = html_escape(text).replace('\n', "<br>");
-                out.push_str(&format!("    <p>{}</p>\n", escaped));
-            }
-            *in_para = false;
-        }
-    };
-
-    // Tokeniza por [s]...[/s] preservando ordem
-    let pattern = regex_split_sections(content);
-    for chunk in pattern {
+    for chunk in regex_split_sections(content) {
         match chunk {
             SectionChunk::Heading(h) => {
-                flush_para(&mut buf, &mut out, &mut in_para);
-                out.push_str(&format!("    <h2>{}</h2>\n", html_escape(h.trim())));
-            }
-            SectionChunk::Text(t) => {
-                for paragraph in t.split("\n\n") {
-                    let trimmed = paragraph.trim_matches('\n');
-                    if trimmed.is_empty() {
-                        flush_para(&mut buf, &mut out, &mut in_para);
-                        continue;
-                    }
-                    flush_para(&mut buf, &mut out, &mut in_para);
-                    buf.push_str(trimmed);
-                    in_para = true;
-                    flush_para(&mut buf, &mut out, &mut in_para);
+                if heading.is_some() || !body.trim().is_empty() {
+                    let n = sections.len();
+                    sections.push(make_section(heading.take(), std::mem::take(&mut body), n));
                 }
+                heading = Some(h.trim().to_string());
+                body.clear();
             }
+            SectionChunk::Text(t) => body.push_str(&text_to_paragraphs_html(t)),
         }
     }
-    flush_para(&mut buf, &mut out, &mut in_para);
+    if heading.is_some() || !body.trim().is_empty() {
+        let n = sections.len();
+        sections.push(make_section(heading.take(), body, n));
+    }
+
+    // Garante ids únicos (headings repetidos ganham sufixo posicional)
+    let mut seen = std::collections::HashSet::new();
+    for (i, sec) in sections.iter_mut().enumerate() {
+        if !seen.insert(sec.id.clone()) {
+            sec.id = format!("{}-{}", sec.id, i + 1);
+            seen.insert(sec.id.clone());
+        }
+    }
+    sections
+}
+
+/// Corpo de uma seção: parágrafos separados por linha em branco; parágrafo
+/// composto só de linhas `- item` vira lista `<ul>`.
+fn text_to_paragraphs_html(text: &str) -> String {
+    let mut out = String::new();
+    for paragraph in text.split("\n\n") {
+        let trimmed = paragraph.trim_matches('\n').trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        let lines: Vec<&str> = trimmed
+            .lines()
+            .map(str::trim)
+            .filter(|l| !l.is_empty())
+            .collect();
+        if !lines.is_empty() && lines.iter().all(|l| l.starts_with("- ")) {
+            out.push_str("        <ul>\n");
+            for l in &lines {
+                out.push_str(&format!("          <li>{}</li>\n", html_escape(l[2..].trim())));
+            }
+            out.push_str("        </ul>\n");
+        } else {
+            let escaped = html_escape(trimmed).replace('\n', "<br>");
+            out.push_str(&format!("        <p>{}</p>\n", escaped));
+        }
+    }
+    out
+}
+
+/// Versão achatada (h2 + corpo, sem wrappers de card) usada pelos testes pra
+/// validar o parsing sem depender do template completo.
+#[cfg(test)]
+fn content_to_html(content: &str) -> String {
+    let mut out = String::new();
+    for sec in content_to_sections(content) {
+        if let Some(h) = &sec.heading {
+            out.push_str(&format!("    <h2>{}</h2>\n", html_escape(h)));
+        }
+        out.push_str(&sec.body_html);
+    }
     out
 }
 
