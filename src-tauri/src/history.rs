@@ -208,6 +208,25 @@ impl History {
         Ok(n as usize)
     }
 
+    /// Metadados leves de TODAS as entradas (aprovadas e descartadas) para o
+    /// dashboard de estatísticas: (created_at, approved, edited, category).
+    /// Não carrega os textos — barato mesmo com histórico grande.
+    pub fn list_stats_meta(&self) -> anyhow::Result<Vec<(i64, bool, bool, Option<String>)>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT created_at, approved, edited, category FROM entries ORDER BY created_at",
+        )?;
+        let rows = stmt.query_map([], |r| {
+            Ok((
+                r.get::<_, i64>(0)?,
+                r.get::<_, bool>(1)?,
+                r.get::<_, bool>(2)?,
+                r.get::<_, Option<String>>(3)?,
+            ))
+        })?;
+        Ok(rows.collect::<Result<Vec<_>, _>>()?)
+    }
+
     pub fn count(&self, approved_only: bool) -> anyhow::Result<usize> {
         let conn = self.conn.lock().unwrap();
         let sql = if approved_only {

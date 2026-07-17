@@ -31,6 +31,47 @@ pub async fn open_chat(app: AppHandle) -> Result<(), String> {
     Ok(())
 }
 
+/// Stream do modo REVISÃO: aplica estilo.md/evitar.md/campos-padrao.md a uma
+/// devolutiva escrita à mão, sem reescrever do zero. Reusa os eventos
+/// `deepseek-token`/`deepseek-done` — a UI cai no ResultView normal e os
+/// fluxos de aprovar/descartar funcionam iguais (raw_input = texto colado).
+#[tauri::command]
+pub async fn stream_revision(
+    app: AppHandle,
+    user_text: String,
+    vault_state: State<'_, VaultState>,
+) -> Result<(), String> {
+    if user_text.trim().is_empty() {
+        return Err("Cole o texto da devolutiva para revisar.".to_string());
+    }
+    let api_key = settings::load_api_key()
+        .map_err(|e| e.to_string())?
+        .ok_or_else(|| "API key da DeepSeek não configurada.".to_string())?;
+
+    let messages = {
+        let loader = vault_state.loader.read().unwrap();
+        crate::prompt::build_revision_messages(loader.context(), &user_text)
+    };
+
+    let app_emit = app.clone();
+    let result = deepseek::stream_chat(&api_key, messages, move |token| {
+        if let Some(chat) = app_emit.get_webview_window("chat") {
+            let _ = chat.emit(
+                "deepseek-token",
+                TokenEvent {
+                    content: token.to_string(),
+                },
+            );
+        }
+    })
+    .await;
+
+    if let Some(chat) = app.get_webview_window("chat") {
+        let _ = chat.emit("deepseek-done", ());
+    }
+    result.map_err(|e| e.to_string())
+}
+
 // ───────────────────────────────────────────────────────────────────────────────
 // Cartilha HTML (#22) — gera prosa didática via IA + salva HTML+imagens no vault
 // ───────────────────────────────────────────────────────────────────────────────
@@ -131,6 +172,7 @@ pub fn save_cartilha(
         index.display(),
         image_inputs.len()
     );
+    maybe_git_backup(&path);
 
     Ok(index.to_string_lossy().into_owned())
 }
@@ -172,6 +214,87 @@ pub fn preview_cartilha(
 // Form de testes (#23) — sugestões de cenários via IA + compilação do texto final
 // ───────────────────────────────────────────────────────────────────────────────
 
+/// Exporta a cartilha salva para PDF usando o Edge headless (`--print-to-pdf`).
+/// Sem dependências novas: Edge/WebView2 já é pré-requisito do app no Windows.
+/// O PDF fica em `cartilha.pdf` ao lado do `index.html`; o CSS `@media print`
+/// do template (esconde sidebar, remove sombras) é aplicado pelo Chromium.
+#[tauri::command]
+pub async fn export_cartilha_pdf(index_html_path: String) -> Result<String, String> {
+    let index = PathBuf::from(&index_html_path);
+    if !index.exists() {
+        return Err(format!("arquivo não encontrado: {}", index_html_path));
+    }
+    let pdf_path = index.with_file_name("cartilha.pdf");
+
+    let edge = [
+        r"C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe",
+        r"C:\Program Files\Microsoft\Edge\Application\msedge.exe",
+    ]
+    .iter()
+    .map(PathBuf::from)
+    .find(|p| p.exists())
+    .ok_or_else(|| "Microsoft Edge não encontrado para gerar o PDF.".to_string())?;
+
+    let url = format!("file:///{}", index.to_string_lossy().replace('\\', "/"));
+    let pdf_arg = format!("--print-to-pdf={}", pdf_path.to_string_lossy());
+    let pdf_check = pdf_path.clone();
+
+    let status = tauri::async_runtime::spawn_blocking(move || {
+        std::process::Command::new(edge)
+            .args(["--headless", "--disable-gpu", "--no-pdf-header-footer", &pdf_arg, &url])
+            .status()
+    })
+    .await
+    .map_err(|e| e.to_string())?
+    .map_err(|e| format!("falha ao executar o Edge: {}", e))?;
+
+    if !status.success() || !pdf_check.exists() {
+        return Err("Edge headless não gerou o PDF.".to_string());
+    }
+
+    tracing::info!("PDF da cartilha gerado: {}", pdf_check.display());
+    Ok(pdf_check.to_string_lossy().into_owned())
+}
+
+/// Lê a hotkey global configurada (formato canônico, ex: "Ctrl+Shift+KeyD").
+#[tauri::command]
+pub fn get_hotkey() -> Result<String, String> {
+    Ok(settings::load_hotkey())
+}
+
+/// Valida, re-registra em runtime e persiste uma nova hotkey global. Se o
+/// registro do novo atalho falhar (ex: combinação em uso por outro app),
+/// restaura o anterior e devolve erro.
+#[tauri::command]
+pub fn set_hotkey(app: AppHandle, hotkey: String) -> Result<(), String> {
+    use tauri_plugin_global_shortcut::{GlobalShortcutExt, Shortcut};
+
+    let trimmed = hotkey.trim().to_string();
+    let new_shortcut: Shortcut = trimmed
+        .parse()
+        .map_err(|e| format!("Atalho inválido '{}': {:?}", trimmed, e))?;
+
+    let previous = settings::load_hotkey();
+    app.global_shortcut()
+        .unregister_all()
+        .map_err(|e| e.to_string())?;
+
+    if let Err(e) = app.global_shortcut().register(new_shortcut) {
+        // Melhor esforço de rollback pro atalho anterior
+        if let Ok(prev) = previous.parse::<Shortcut>() {
+            let _ = app.global_shortcut().register(prev);
+        }
+        return Err(format!(
+            "Falha ao registrar '{}': {} (outra aplicação pode estar usando a combinação)",
+            trimmed, e
+        ));
+    }
+
+    settings::save_hotkey(&trimmed).map_err(|e| e.to_string())?;
+    tracing::info!("hotkey global atualizada para '{}'", trimmed);
+    Ok(())
+}
+
 /// Abre um arquivo ou pasta no aplicativo padrão do sistema (browser para HTML,
 /// Explorer para pastas). Windows-only — usa `cmd /c start`. Evita adicionar
 /// `tauri-plugin-shell` ou `tauri-plugin-opener` só para isso.
@@ -198,6 +321,122 @@ pub async fn suggest_test_scenarios(
     deepseek::suggest_test_scenarios(&api_key, &form_input)
         .await
         .map_err(|e| format!("Sugestão falhou: {}", e))
+}
+
+// ───────────────────────────────────────────────────────────────────────────────
+// Dashboard de estatísticas — mede a meta "edições tendendo a zero" a partir do
+// histórico SQLite. Parsing puro, sem IA.
+// ───────────────────────────────────────────────────────────────────────────────
+
+#[derive(Serialize, Clone)]
+pub struct WeekStat {
+    /// Chave ordenável "AAAA-Wss" (semana ISO), ex: "2026-W28"
+    pub week: String,
+    pub total: usize,
+    pub edited: usize,
+}
+
+#[derive(Serialize)]
+pub struct CategoryStat {
+    pub category: String,
+    pub total: usize,
+    pub edited: usize,
+}
+
+#[derive(Serialize)]
+pub struct LearningStats {
+    pub total: usize,
+    pub approved: usize,
+    pub discarded: usize,
+    pub edited_approved: usize,
+    /// Últimas 12 semanas ISO com aprovadas (semanas sem atividade não aparecem)
+    pub weeks: Vec<WeekStat>,
+    /// Aprovadas por categoria, mais frequente primeiro
+    pub categories: Vec<CategoryStat>,
+}
+
+/// Agrega o histórico em métricas de evolução: taxa de edição por semana ISO e
+/// volume por categoria (só aprovadas — descartadas entram apenas no total).
+#[tauri::command]
+pub fn learning_stats(history_state: State<'_, HistoryState>) -> Result<LearningStats, String> {
+    let meta = history_state
+        .history
+        .list_stats_meta()
+        .map_err(|e| e.to_string())?;
+
+    let total = meta.len();
+    let approved_meta: Vec<_> = meta.iter().filter(|(_, approved, _, _)| *approved).collect();
+    let approved = approved_meta.len();
+    let discarded = total - approved;
+    let edited_approved = approved_meta.iter().filter(|(_, _, edited, _)| *edited).count();
+
+    // Buckets semanais (semana ISO) — BTreeMap mantém ordem cronológica
+    let mut weeks: std::collections::BTreeMap<String, (usize, usize)> =
+        std::collections::BTreeMap::new();
+    for (created_at, _, edited, _) in &approved_meta {
+        let Some(dt) = chrono::DateTime::from_timestamp(*created_at, 0) else {
+            continue;
+        };
+        use chrono::Datelike;
+        let iso = dt.iso_week();
+        let key = format!("{}-W{:02}", iso.year(), iso.week());
+        let slot = weeks.entry(key).or_insert((0, 0));
+        slot.0 += 1;
+        if *edited {
+            slot.1 += 1;
+        }
+    }
+    let weeks: Vec<WeekStat> = weeks
+        .into_iter()
+        .map(|(week, (total, edited))| WeekStat { week, total, edited })
+        .collect();
+    let weeks = if weeks.len() > 12 {
+        weeks[weeks.len() - 12..].to_vec()
+    } else {
+        weeks
+    };
+
+    // Por categoria (aprovadas)
+    let mut cats: std::collections::HashMap<String, (usize, usize)> =
+        std::collections::HashMap::new();
+    for (_, _, edited, category) in &approved_meta {
+        let key = category.clone().unwrap_or_else(|| "sem-categoria".to_string());
+        let slot = cats.entry(key).or_insert((0, 0));
+        slot.0 += 1;
+        if *edited {
+            slot.1 += 1;
+        }
+    }
+    let mut categories: Vec<CategoryStat> = cats
+        .into_iter()
+        .map(|(category, (total, edited))| CategoryStat { category, total, edited })
+        .collect();
+    categories.sort_by(|a, b| b.total.cmp(&a.total).then(a.category.cmp(&b.category)));
+
+    Ok(LearningStats {
+        total,
+        approved,
+        discarded,
+        edited_approved,
+        weeks,
+        categories,
+    })
+}
+
+/// Extrai os campos do FormView a partir do texto bruto de um ticket (conversa,
+/// descrição ou anotações). Frontend mescla o retorno com o formulário atual,
+/// preservando o que o usuário já digitou.
+#[tauri::command]
+pub async fn extract_form_fields(
+    ticket_text: String,
+) -> Result<deepseek::FormFieldsSuggestion, String> {
+    let api_key = settings::load_api_key()
+        .map_err(|e| e.to_string())?
+        .ok_or_else(|| "API key da DeepSeek não configurada.".to_string())?;
+
+    deepseek::extract_form_fields(&api_key, &ticket_text)
+        .await
+        .map_err(|e| format!("Extração falhou: {}", e))
 }
 
 // ───────────────────────────────────────────────────────────────────────────────
@@ -293,11 +532,50 @@ pub fn apply_phrase_templates(
         l.reload();
         let _ = app.emit("vault-changed", l.status().clone());
     }
+    maybe_git_backup(&path);
 
     Ok(written
         .file_name()
         .map(|n| n.to_string_lossy().into_owned())
         .unwrap_or_else(|| "campos-padrao.md".to_string()))
+}
+
+// ── Backup git do vault (#10) ───────────────────────────────────────────────
+
+/// Dispara o backup git do vault se o toggle estiver ligado nas Configurações.
+/// Best-effort: falha vira warn no log — nunca quebra a operação que acabou de
+/// escrever no vault.
+fn maybe_git_backup(vault_path: &std::path::Path) {
+    if !settings::load_vault_git_backup() {
+        return;
+    }
+    match vault::git_backup(vault_path) {
+        Ok(true) => tracing::info!("backup git do vault commitado"),
+        Ok(false) => {}
+        Err(e) => tracing::warn!("backup git do vault falhou: {}", e),
+    }
+}
+
+#[tauri::command]
+pub fn get_vault_git_backup() -> Result<bool, String> {
+    Ok(settings::load_vault_git_backup())
+}
+
+/// Liga/desliga o backup git automático. Ao ligar com vault configurado, roda
+/// um backup inicial imediato — se o git não estiver disponível, o erro volta
+/// pro usuário e o toggle não é persistido.
+#[tauri::command]
+pub fn set_vault_git_backup(
+    enabled: bool,
+    vault_state: State<'_, VaultState>,
+) -> Result<(), String> {
+    if enabled {
+        let vault_path = vault_state.loader.read().unwrap().status().path.clone();
+        if let Some(p) = vault_path {
+            vault::git_backup(&PathBuf::from(&p)).map_err(|e| e.to_string())?;
+        }
+    }
+    settings::save_vault_git_backup(enabled).map_err(|e| e.to_string())
 }
 
 // ── Autostart (Fase 4) ─────────────────────────────────────────────────────
@@ -444,7 +722,10 @@ pub fn get_vault_status(state: State<'_, VaultState>) -> VaultStatus {
 
 #[tauri::command]
 pub fn seed_vault(path: String) -> Result<Vec<String>, String> {
-    vault::seed_vault(&PathBuf::from(&path)).map_err(|e| e.to_string())
+    let p = PathBuf::from(&path);
+    let files = vault::seed_vault(&p).map_err(|e| e.to_string())?;
+    maybe_git_backup(&p);
+    Ok(files)
 }
 
 #[derive(Serialize, Clone)]
@@ -610,7 +891,7 @@ pub async fn approve_entry(
     let vault_path = vault_state.loader.read().unwrap().status().path.clone();
     let examples_file = if let Some(p) = vault_path {
         let path = PathBuf::from(p);
-        match vault::append_to_category_examples(&path, &category, &raw_input, &final_output) {
+        let file_written = match vault::append_to_category_examples(&path, &category, &raw_input, &final_output) {
             Ok(file) => {
                 tracing::info!(
                     "entry #{} ({}) appendado em {:?}",
@@ -632,7 +913,9 @@ pub async fn approve_entry(
                 );
                 None
             }
-        }
+        };
+        maybe_git_backup(&path);
+        file_written
     } else {
         tracing::info!(
             "entry #{} aprovado (vault não configurado, pulando .md per-categoria)",
@@ -822,6 +1105,7 @@ pub fn apply_evitar_suggestions(
 
     let path = std::path::PathBuf::from(vault_path);
     let written = vault::append_to_evitar(&path, &pairs).map_err(|e| e.to_string())?;
+    maybe_git_backup(&path);
 
     Ok(written
         .file_name()
@@ -928,6 +1212,7 @@ pub fn apply_style_synthesis(
         l.reload();
         let _ = app.emit("vault-changed", l.status().clone());
     }
+    maybe_git_backup(&path);
 
     Ok(written
         .file_name()
@@ -1059,6 +1344,7 @@ pub fn apply_campos_suggestions(
         l.reload();
         let _ = app.emit("vault-changed", l.status().clone());
     }
+    maybe_git_backup(&path);
 
     Ok(written
         .file_name()

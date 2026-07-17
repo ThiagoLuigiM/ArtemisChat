@@ -13,6 +13,40 @@ pub struct Config {
     /// serializada em hex. Só é decifrável pelo mesmo usuário do Windows.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub api_key_enc: Option<String>,
+    /// Hotkey global para abrir o chat, no formato canônico parseável pelo
+    /// plugin global-shortcut: modificadores + Code W3C (ex: "Ctrl+Shift+KeyD").
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub hotkey: Option<String>,
+    /// Backup automático do vault com git a cada escrita do app (default off).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub vault_git_backup: Option<bool>,
+}
+
+pub fn load_vault_git_backup() -> bool {
+    load_config().vault_git_backup.unwrap_or(false)
+}
+
+pub fn save_vault_git_backup(enabled: bool) -> anyhow::Result<()> {
+    let mut config = load_config();
+    config.vault_git_backup = Some(enabled);
+    save_config(&config)
+}
+
+/// Formato canônico: tokens de modificador (Ctrl/Alt/Shift/Super) + Code W3C
+/// ("KeyD", "Digit1", "F5"), que é o que o parser do global_hotkey aceita.
+pub const DEFAULT_HOTKEY: &str = "Ctrl+Shift+KeyD";
+
+pub fn load_hotkey() -> String {
+    load_config()
+        .hotkey
+        .filter(|h| !h.trim().is_empty())
+        .unwrap_or_else(|| DEFAULT_HOTKEY.to_string())
+}
+
+pub fn save_hotkey(hotkey: &str) -> anyhow::Result<()> {
+    let mut config = load_config();
+    config.hotkey = Some(hotkey.to_string());
+    save_config(&config)
 }
 
 pub fn config_dir() -> anyhow::Result<PathBuf> {

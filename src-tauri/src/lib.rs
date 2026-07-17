@@ -18,10 +18,17 @@ use tauri_plugin_autostart::MacosLauncher;
 use tauri_plugin_global_shortcut::{Code, GlobalShortcutExt, Modifiers, Shortcut, ShortcutState};
 use tracing_subscriber::EnvFilter;
 
-/// Hotkey hardcoded de 1ª versão. Configurabilidade via Settings é trabalho de
-/// iteração futura — exige UI de captura de tecla + persistência + re-registro.
-fn default_hotkey() -> Shortcut {
+/// Fallback quando o valor salvo em config.json não parseia.
+fn fallback_hotkey() -> Shortcut {
     Shortcut::new(Some(Modifiers::CONTROL | Modifiers::SHIFT), Code::KeyD)
+}
+
+/// Hotkey configurada pelo usuário (config.json), com fallback Ctrl+Shift+D.
+/// Reconfigurável em runtime via comando `set_hotkey` (re-registro dinâmico).
+fn configured_hotkey() -> Shortcut {
+    settings::load_hotkey()
+        .parse()
+        .unwrap_or_else(|_| fallback_hotkey())
 }
 
 use commands::{HistoryState, VaultState};
@@ -46,8 +53,11 @@ pub fn run() {
         ))
         .plugin(
             tauri_plugin_global_shortcut::Builder::new()
-                .with_handler(|app, shortcut, event| {
-                    if event.state() == ShortcutState::Pressed && shortcut == &default_hotkey() {
+                .with_handler(|app, _shortcut, event| {
+                    // O app registra UM único atalho por vez (o configurado) —
+                    // qualquer disparo do handler é ele. Comparar contra o valor
+                    // do config aqui exigiria IO de arquivo por keypress.
+                    if event.state() == ShortcutState::Pressed {
                         show_chat(app);
                     }
                 })
@@ -161,12 +171,13 @@ pub fn run() {
                 })
                 .build(app)?;
 
-            // ── Global shortcut: Ctrl+Shift+D abre o chat ───────────────────
+            // ── Global shortcut: abre o chat (configurável em Settings) ─────
             // O handler foi registrado no Builder; aqui só ativamos a captura.
-            if let Err(e) = app.global_shortcut().register(default_hotkey()) {
-                tracing::warn!("falha ao registrar hotkey global Ctrl+Shift+D: {} (outra app pode estar usando)", e);
+            let hotkey_display = settings::load_hotkey();
+            if let Err(e) = app.global_shortcut().register(configured_hotkey()) {
+                tracing::warn!("falha ao registrar hotkey global {}: {} (outra app pode estar usando)", hotkey_display, e);
             } else {
-                tracing::info!("hotkey global Ctrl+Shift+D ativada");
+                tracing::info!("hotkey global {} ativada", hotkey_display);
             }
 
             Ok(())
@@ -181,6 +192,7 @@ pub fn run() {
             commands::get_vault_status,
             commands::seed_vault,
             commands::stream_completion,
+            commands::stream_revision,
             commands::approve_entry,
             commands::discard_entry,
             commands::list_history,
@@ -196,15 +208,22 @@ pub fn run() {
             commands::apply_style_synthesis,
             commands::analyze_campos,
             commands::apply_campos_suggestions,
+            commands::learning_stats,
             commands::analyze_phrase_templates,
             commands::apply_phrase_templates,
             commands::stream_cartilha,
             commands::save_cartilha,
             commands::preview_cartilha,
+            commands::export_cartilha_pdf,
             commands::open_in_system,
             commands::suggest_test_scenarios,
+            commands::extract_form_fields,
             commands::get_autostart_enabled,
             commands::set_autostart_enabled,
+            commands::get_hotkey,
+            commands::set_hotkey,
+            commands::get_vault_git_backup,
+            commands::set_vault_git_backup,
             commands::check_for_update,
             commands::download_and_install_update,
         ])

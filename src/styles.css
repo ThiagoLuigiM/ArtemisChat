@@ -679,6 +679,292 @@ html.window-chat body {
   border-radius: 3px;
 }
 
+/* Hotkey configurável (SettingsPanel) */
+.hotkey-input {
+  width: 100%;
+  box-sizing: border-box;
+  margin-top: 4px;
+  background: #232328;
+  color: #e8e8ec;
+  border: 1px solid #2c2c30;
+  border-radius: 6px;
+  padding: 7px 10px;
+  font-size: 12.5px;
+  outline: none;
+  cursor: pointer;
+  text-align: center;
+  font-family: ui-monospace, "Cascadia Code", "Consolas", monospace;
+}
+
+.hotkey-input.capturing {
+  border-color: #5b6cff;
+  color: #a8a8b0;
+}
+
+/* RevisaoView — revisão de devolutiva escrita à mão */
+.revisao-view {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 12px 14px;
+  height: 100%;
+  box-sizing: border-box;
+}
+
+.revisao-text {
+  flex: 1;
+  display: flex;
+}
+
+.revisao-text textarea {
+  flex: 1;
+  resize: none;
+}
+
+.revisao-actions {
+  display: flex;
+  gap: 8px;
+  justify-content: flex-end;
+}
+
+/* StatsTab — dashboard de evolução do aprendizado */
+.stats-tab {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  overflow-y: auto;
+  scrollbar-width: thin;
+  scrollbar-color: #3a3a45 transparent;
+}
+
+.stats-cards {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 8px;
+}
+
+.stats-card {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 2px;
+  padding: 12px 8px;
+  border: 1px solid #2c2c30;
+  border-radius: 6px;
+  background: #232328;
+}
+
+.stats-card strong {
+  font-size: 20px;
+  color: #e8e8ec;
+}
+
+.stats-card span {
+  font-size: 11px;
+  color: #a8a8b0;
+}
+
+.stats-section-title {
+  margin: 10px 0 0;
+  font-size: 13px;
+  font-weight: 600;
+  color: #e8e8ec;
+}
+
+.stats-bars {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.stats-bar-row {
+  display: grid;
+  grid-template-columns: 92px 1fr 44px;
+  gap: 8px;
+  align-items: center;
+}
+
+.stats-bar-label {
+  font-size: 11px;
+  color: #a8a8b0;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.stats-bar-track {
+  height: 14px;
+  background: #232328;
+  border-radius: 4px;
+  overflow: hidden;
+}
+
+.stats-bar-fill {
+  height: 100%;
+  background: #2f7d4d;
+  border-radius: 4px;
+  position: relative;
+  min-width: 2px;
+}
+
+.stats-bar-edited {
+  position: absolute;
+  left: 0;
+  top: 0;
+  height: 100%;
+  background: #b8860b;
+}
+
+.stats-bar-value {
+  font-size: 11px;
+  color: #a8a8b0;
+  text-align: right;
+  white-space: nowrap;
+}
+
+/* HistoryPanel — busca e revisão do histórico */
+.history-toolbar {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+}
+
+.history-toolbar input[type="text"] {
+  flex: 1;
+  background: #232328;
+  color: #e8e8ec;
+  border: 1px solid #2c2c30;
+  border-radius: 6px;
+  padding: 7px 10px;
+  font-size: 12.5px;
+  outline: none;
+}
+
+.history-filter {
+  display: flex;
+  gap: 5px;
+  align-items: center;
+  font-size: 11px;
+  color: #a8a8b0;
+  white-space: nowrap;
+  cursor: pointer;
+}
+
+.history-list {
+  flex: 1;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  scrollbar-width: thin;
+  scrollbar-color: #3a3a45 transparent;
+}
+
+.history-card {
+  border: 1px solid #2c2c30;
+  border-radius: 6px;
+  padding: 8px 10px;
+  background: #232328;
+}
+
+.history-card-head {
+  display: flex;
+  gap: 6px;
+  align-items: center;
+  flex-wrap: wrap;
+  width: 100%;
+  background: none;
+  border: none;
+  padding: 0;
+  cursor: pointer;
+  color: inherit;
+  text-align: left;
+}
+
+.history-date {
+  font-size: 11px;
+  color: #a8a8b0;
+}
+
+.history-chip {
+  font-size: 10px;
+  padding: 1px 7px;
+  border-radius: 999px;
+  background: #2c2c34;
+  color: #c9c9d4;
+}
+
+.history-chip.ok { background: #1d4a2f; color: #9fe0b3; }
+.history-chip.off { background: #4a1d1d; color: #e09f9f; }
+.history-chip.warn { background: #4a3a1d; color: #e0cd9f; }
+
+.history-preview {
+  margin: 6px 0 0;
+  font-size: 12px;
+  color: #c9c9d4;
+  line-height: 1.45;
+}
+
+.history-detail {
+  margin-top: 8px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.history-detail pre {
+  white-space: pre-wrap;
+  font-size: 12px;
+  background: #18181b;
+  border: 1px solid #2c2c30;
+  border-radius: 6px;
+  padding: 8px 10px;
+  margin: 0;
+  max-height: 220px;
+  overflow: auto;
+  font-family: inherit;
+  line-height: 1.5;
+  scrollbar-width: thin;
+  scrollbar-color: #3a3a45 transparent;
+}
+
+.history-detail summary {
+  cursor: pointer;
+  font-size: 11px;
+  color: #a8a8b0;
+}
+
+.history-detail details pre {
+  margin-top: 6px;
+}
+
+.history-detail .row {
+  display: flex;
+  gap: 8px;
+  justify-content: flex-end;
+}
+
+/* Preencher formulário a partir do ticket (extração via IA) */
+.ticket-extract-toggle {
+  width: 100%;
+  text-align: center;
+}
+
+.ticket-extract-box {
+  border: 1px dashed #3a3a45;
+  border-radius: 6px;
+  padding: 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.ticket-extract-box .row {
+  display: flex;
+  gap: 8px;
+  justify-content: flex-end;
+}
+
 .form-field {
   display: flex;
   flex-direction: column;

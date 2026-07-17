@@ -564,7 +564,142 @@ pub fn save_cartilha(
     let date = chrono::Local::now().format("%Y-%m-%d").to_string();
     let slug = slug_from_title(title);
     let cartilha_dir = vault_path.join("cartilhas").join(format!("{}-{}", date, slug));
-    write_cartilha_bundle(&cartilha_dir, title, content, release, author, images)
+    let index = write_cartilha_bundle(&cartilha_dir, title, content, release, author, images)?;
+
+    // Índice mestre é best-effort: falha nele não invalida a cartilha salva
+    if let Err(e) = regenerate_cartilhas_index(vault_path) {
+        tracing::warn!("falha regenerando índice de cartilhas: {}", e);
+    }
+    Ok(index)
+}
+
+/// Regenera o índice mestre `cartilhas/index.html`: lista toda pasta
+/// `YYYY-MM-DD-<slug>/` que contenha um `index.html`, mais recente primeiro
+/// (o prefixo de data no nome da pasta dá a ordenação). O título é extraído
+/// do `<title>` de cada cartilha (já escapado pelo renderer — inserido as-is).
+pub fn regenerate_cartilhas_index(vault_path: &Path) -> anyhow::Result<PathBuf> {
+    let cartilhas_dir = vault_path.join("cartilhas");
+    fs::create_dir_all(&cartilhas_dir)?;
+
+    let mut items: Vec<(String, String, String)> = Vec::new(); // (pasta, data dd/mm/aaaa, título)
+    for entry in fs::read_dir(&cartilhas_dir)? {
+        let entry = entry?;
+        if !entry.file_type()?.is_dir() {
+            continue;
+        }
+        let folder = entry.file_name().to_string_lossy().into_owned();
+        let index = entry.path().join("index.html");
+        if !index.exists() {
+            continue;
+        }
+        let title = fs::read_to_string(&index)
+            .ok()
+            .and_then(|html| {
+                let start = html.find("<title>")? + "<title>".len();
+                let end = html[start..].find("</title>")? + start;
+                Some(html[start..end].trim().to_string())
+            })
+            .filter(|t| !t.is_empty())
+            .unwrap_or_else(|| folder.clone());
+        let date_display = folder
+            .get(..10)
+            .filter(|d| d.len() == 10 && d.chars().nth(4) == Some('-'))
+            .map(|d| format!("{}/{}/{}", &d[8..10], &d[5..7], &d[0..4]))
+            .unwrap_or_default();
+        items.push((folder, date_display, title));
+    }
+    items.sort_by(|a, b| b.0.cmp(&a.0));
+
+    let mut cards = String::new();
+    for (folder, date, title) in &items {
+        cards.push_str(&format!(
+            "      <a class=\"card\" href=\"./{folder}/index.html\">\n        <strong>{title}</strong>\n        <span>{date}</span>\n      </a>\n",
+            folder = html_escape(folder),
+            title = title,
+            date = html_escape(date),
+        ));
+    }
+
+    let generated = chrono::Local::now().format("%d/%m/%Y %H:%M").to_string();
+    let html = format!(
+        r#"<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Cartilhas — Artemis</title>
+  <style>
+    :root {{
+      --azul: #072b73;
+      --texto: #1f2937;
+      --muted: #64748b;
+      --borda: #d8e1ec;
+      --fundo: #f4f7fb;
+      --radius: 8px;
+    }}
+    * {{ box-sizing: border-box; }}
+    body {{
+      margin: 0;
+      background: var(--fundo);
+      color: var(--texto);
+      font-family: "Segoe UI", Arial, sans-serif;
+      font-size: 16px;
+      line-height: 1.6;
+    }}
+    main {{ max-width: 980px; margin: 0 auto; padding: 34px 24px 70px; }}
+    .hero {{
+      padding: 38px;
+      border-radius: var(--radius);
+      color: #fff;
+      background: linear-gradient(110deg, #072b73, #176b87);
+      box-shadow: 0 16px 40px rgba(15, 23, 42, .10);
+    }}
+    .hero h1 {{ margin: 0; font-size: clamp(30px, 4vw, 44px); line-height: 1.08; }}
+    .hero p {{ margin: 12px 0 0; color: #edf4ff; }}
+    .cards {{ display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 14px; margin-top: 26px; }}
+    .card {{
+      display: flex;
+      flex-direction: column;
+      gap: 6px;
+      padding: 18px;
+      border: 1px solid var(--borda);
+      border-radius: var(--radius);
+      background: #fff;
+      color: inherit;
+      text-decoration: none;
+      box-shadow: 0 4px 14px rgba(15, 23, 42, .04);
+    }}
+    .card:hover {{ border-color: var(--azul); }}
+    .card strong {{ color: var(--azul); font-size: 17px; line-height: 1.3; }}
+    .card span {{ color: var(--muted); font-size: 13px; }}
+    .empty {{ margin-top: 26px; color: var(--muted); }}
+    footer {{ margin-top: 34px; color: var(--muted); font-size: 13px; }}
+    @media (max-width: 720px) {{ .cards {{ grid-template-columns: 1fr; }} }}
+  </style>
+</head>
+<body>
+  <main>
+    <header class="hero">
+      <h1>Cartilhas</h1>
+      <p>{count} cartilha(s) gerada(s) pelo Artemis.</p>
+    </header>
+{body}    <footer>Índice regenerado automaticamente pelo Artemis em {generated}.</footer>
+  </main>
+</body>
+</html>
+"#,
+        count = items.len(),
+        body = if cards.is_empty() {
+            "    <p class=\"empty\">Nenhuma cartilha ainda.</p>\n".to_string()
+        } else {
+            format!("    <div class=\"cards\">\n{}    </div>\n", cards)
+        },
+        generated = html_escape(&generated),
+    );
+
+    let path = cartilhas_dir.join("index.html");
+    fs::write(&path, html)?;
+    Ok(path)
 }
 
 /// Renderiza a cartilha numa pasta temporária FIXA (fora do vault), recriada a
@@ -817,6 +952,67 @@ const CARTILHA_CSS: &str = r#"    :root {
       font-size: 28px;
       line-height: 1.22;
     }
+
+    .steps {
+      margin: 18px 0 12px;
+      counter-reset: step;
+    }
+
+    .step {
+      display: grid;
+      grid-template-columns: 42px minmax(0, 1fr);
+      gap: 14px;
+      align-items: start;
+      padding: 12px 0;
+      border-top: 1px solid var(--borda);
+    }
+
+    .step:first-child { border-top: 0; }
+
+    .step::before {
+      counter-increment: step;
+      content: counter(step);
+      width: 34px;
+      height: 34px;
+      display: inline-grid;
+      place-items: center;
+      border-radius: 50%;
+      background: var(--azul);
+      color: #fff;
+      font-weight: 700;
+    }
+
+    .step p { margin: 5px 0 0; }
+
+    .table-wrap {
+      overflow-x: auto;
+      margin: 16px 0 12px;
+      border: 1px solid var(--borda);
+      border-radius: var(--radius);
+    }
+
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      background: #fff;
+    }
+
+    th, td {
+      padding: 10px 12px;
+      border-bottom: 1px solid var(--borda);
+      text-align: left;
+      vertical-align: top;
+    }
+
+    th {
+      color: #344055;
+      background: #eef3f8;
+      font-size: 13px;
+      letter-spacing: .04em;
+      text-transform: uppercase;
+    }
+
+    tr:last-child td { border-bottom: 0; }
 
     .callout {
       margin: 18px 0 12px;
@@ -1256,7 +1452,64 @@ fn render_text_block(text: &str, images: &[(String, String)], used: &mut [bool])
     out
 }
 
-/// Emite as linhas acumuladas como `<ul>` (se todas forem `- item`) ou `<p>`.
+/// Reconhece linha de passo numerado: `1. texto` ou `1) texto`.
+/// Retorna o texto sem o prefixo (o círculo numerado do CSS mostra o número).
+fn strip_step_prefix(line: &str) -> Option<&str> {
+    let digits_end = line.find(|c: char| !c.is_ascii_digit())?;
+    if digits_end == 0 {
+        return None;
+    }
+    let rest = &line[digits_end..];
+    let rest = rest.strip_prefix('.').or_else(|| rest.strip_prefix(')'))?;
+    let rest = rest.strip_prefix(' ')?.trim();
+    if rest.is_empty() {
+        None
+    } else {
+        Some(rest)
+    }
+}
+
+/// Linha separadora estilo markdown (`|---|---|`) — ignorada nas tabelas.
+fn is_table_separator(line: &str) -> bool {
+    !line.is_empty() && line.chars().all(|c| matches!(c, '-' | '|' | ':' | ' '))
+}
+
+/// Tabela no padrão dos guias: primeira linha do bloco é o cabeçalho, células
+/// separadas por `|`.
+fn render_table(lines: &[&str], out: &mut String) {
+    let rows: Vec<Vec<String>> = lines
+        .iter()
+        .filter(|l| !is_table_separator(l))
+        .map(|l| {
+            l.trim_matches('|')
+                .split('|')
+                .map(|c| html_escape(c.trim()))
+                .collect()
+        })
+        .collect();
+    if rows.is_empty() {
+        return;
+    }
+    out.push_str("        <div class=\"table-wrap\">\n          <table>\n            <thead>\n              <tr>");
+    for cell in &rows[0] {
+        out.push_str(&format!("<th>{}</th>", cell));
+    }
+    out.push_str("</tr>\n            </thead>\n            <tbody>\n");
+    for row in &rows[1..] {
+        out.push_str("              <tr>");
+        for cell in row {
+            out.push_str(&format!("<td>{}</td>", cell));
+        }
+        out.push_str("</tr>\n");
+    }
+    out.push_str("            </tbody>\n          </table>\n        </div>\n");
+}
+
+/// Emite as linhas acumuladas conforme o formato do bloco:
+/// - todas `- item` → `<ul>`
+/// - ≥2 linhas numeradas `1.`/`1)` → passos com círculos numerados (`.steps`)
+/// - ≥2 linhas com `|` → tabela (`.table-wrap`; primeira linha = cabeçalho)
+/// - senão → `<p>` com `<br>`
 fn flush_segment(lines: &mut Vec<&str>, out: &mut String) {
     if lines.is_empty() {
         return;
@@ -1267,6 +1520,18 @@ fn flush_segment(lines: &mut Vec<&str>, out: &mut String) {
             out.push_str(&format!("          <li>{}</li>\n", html_escape(l[2..].trim())));
         }
         out.push_str("        </ul>\n");
+    } else if lines.len() >= 2 && lines.iter().all(|l| strip_step_prefix(l).is_some()) {
+        out.push_str("        <div class=\"steps\">\n");
+        for l in lines.iter() {
+            let text = strip_step_prefix(l).unwrap_or(l);
+            out.push_str(&format!(
+                "          <div class=\"step\"><div><p>{}</p></div></div>\n",
+                html_escape(text)
+            ));
+        }
+        out.push_str("        </div>\n");
+    } else if lines.len() >= 2 && lines.iter().all(|l| l.contains('|')) {
+        render_table(lines, out);
     } else {
         let escaped = lines
             .iter()
@@ -1322,6 +1587,88 @@ fn regex_split_sections(s: &str) -> Vec<SectionChunk<'_>> {
         out.push(SectionChunk::Text(&s[cursor..]));
     }
     out
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Backup automático do vault com git — histórico completo do aprendizado
+// (os .bak guardam só o último estado; o git guarda tudo).
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Comando git sem janela de console piscando (app GUI no Windows).
+fn git_command() -> std::process::Command {
+    let cmd = std::process::Command::new("git");
+    #[cfg(windows)]
+    let cmd = {
+        use std::os::windows::process::CommandExt;
+        let mut c = cmd;
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        c.creation_flags(CREATE_NO_WINDOW);
+        c
+    };
+    cmd
+}
+
+/// Commit automático de TODO o vault. `git init` na primeira vez; depois
+/// `add -A` + `commit`. Identidade e assinatura são forçadas por `-c` locais
+/// (user.name=Artemis, sem GPG) pra não depender da config global do usuário
+/// nem travar em pinentry. Retorna Ok(true) se commitou, Ok(false) se não
+/// havia mudanças.
+pub fn git_backup(vault_path: &Path) -> anyhow::Result<bool> {
+    let version_ok = git_command()
+        .arg("--version")
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false);
+    if !version_ok {
+        anyhow::bail!("git não encontrado no PATH");
+    }
+
+    if !vault_path.join(".git").exists() {
+        let out = git_command().arg("init").current_dir(vault_path).output()?;
+        if !out.status.success() {
+            anyhow::bail!("git init falhou: {}", String::from_utf8_lossy(&out.stderr));
+        }
+        tracing::info!("git init no vault: {}", vault_path.display());
+    }
+
+    let out = git_command()
+        .args(["add", "-A"])
+        .current_dir(vault_path)
+        .output()?;
+    if !out.status.success() {
+        anyhow::bail!("git add falhou: {}", String::from_utf8_lossy(&out.stderr));
+    }
+
+    let msg = format!(
+        "artemis: backup automático {}",
+        chrono::Local::now().format("%d/%m/%Y %H:%M:%S")
+    );
+    let out = git_command()
+        .args([
+            "-c",
+            "user.name=Artemis",
+            "-c",
+            "user.email=artemis@local",
+            "-c",
+            "commit.gpgsign=false",
+            "commit",
+            "-m",
+            &msg,
+        ])
+        .current_dir(vault_path)
+        .output()?;
+
+    if out.status.success() {
+        return Ok(true);
+    }
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    // `git commit` sem mudanças staged sai com código != 0 — não é erro
+    if stdout.contains("nothing to commit") || stderr.contains("nothing to commit") {
+        Ok(false)
+    } else {
+        anyhow::bail!("git commit falhou: {}{}", stdout, stderr)
+    }
 }
 
 pub fn seed_vault(target_path: &Path) -> anyhow::Result<Vec<String>> {
@@ -1700,6 +2047,23 @@ mod tests {
     }
 
     #[test]
+    fn save_cartilha_regenerates_master_index() {
+        let dir = temp_vault();
+        save_cartilha(&dir, "Primeira cartilha", "[s]A :[/s]\n\ntexto", None, None, &[]).unwrap();
+        save_cartilha(&dir, "Segunda cartilha", "[s]B :[/s]\n\ntexto", None, None, &[]).unwrap();
+
+        let index_path = dir.join("cartilhas").join("index.html");
+        assert!(index_path.exists());
+        let html = fs::read_to_string(&index_path).unwrap();
+        assert!(html.contains("Primeira cartilha"));
+        assert!(html.contains("Segunda cartilha"));
+        assert!(html.contains("2 cartilha(s)"));
+        // Links relativos para os index.html das cartilhas
+        assert!(html.contains("primeira-cartilha/index.html"));
+        assert!(html.contains("segunda-cartilha/index.html"));
+    }
+
+    #[test]
     fn callouts_render_with_kind_classes_and_bold_label() {
         let html = content_to_html(
             "[s]Observações :[/s]\n\n[atencao]Atenção: cuidado com a filial.[/atencao]\n\n[dica]Dica: use o perfil padrão.[/dica]\n\n[ok]Resultado esperado: botão habilitado.[/ok]",
@@ -1714,6 +2078,35 @@ mod tests {
         // Tags não vazam como texto
         assert!(!html.contains("[atencao]"));
         assert!(!html.contains("[/ok]"));
+    }
+
+    #[test]
+    fn numbered_lines_render_as_steps() {
+        let html = content_to_html(
+            "[s]Passo a passo :[/s]\n\n1. Acesse o menu.\n2. Abra a aba Permissões.\n3. Salve.",
+        );
+        assert!(html.contains("<div class=\"steps\">"));
+        assert_eq!(html.matches("<div class=\"step\">").count(), 3);
+        // Prefixo numérico removido (o círculo do CSS mostra o número)
+        assert!(html.contains("<p>Acesse o menu.</p>"));
+        assert!(!html.contains("1. Acesse"));
+        // Linha numerada sozinha continua parágrafo normal
+        let single = content_to_html("1. Só uma linha.");
+        assert!(!single.contains("steps"));
+        assert!(single.contains("<p>1. Só uma linha.</p>"));
+    }
+
+    #[test]
+    fn pipe_lines_render_as_table() {
+        let html = content_to_html(
+            "[s]Parâmetros :[/s]\n\nCampo | Obrigatório | Descrição\n|---|---|---|\nNome | Sim | Nome do produto\nEAN | Não | Código de barras",
+        );
+        assert!(html.contains("<div class=\"table-wrap\">"));
+        assert!(html.contains("<th>Campo</th><th>Obrigatório</th><th>Descrição</th>"));
+        assert!(html.contains("<td>Nome</td><td>Sim</td><td>Nome do produto</td>"));
+        assert!(html.contains("<td>EAN</td>"));
+        // Separador markdown é descartado
+        assert!(!html.contains("---"));
     }
 
     #[test]

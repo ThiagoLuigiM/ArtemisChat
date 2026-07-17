@@ -144,6 +144,23 @@ const EMPTY_FORM: FormFields = {
   cenario: "",
 };
 
+// Rascunho persistente do formulário: sobrevive a fechar/reabrir o app.
+// localStorage do WebView2 persiste no perfil do app; merge com EMPTY_FORM
+// tolera drift de schema (campos novos entram vazios, antigos são ignorados
+// pelo TypeScript e inofensivos em runtime).
+const FORM_DRAFT_KEY = "artemis-form-draft";
+
+function loadFormDraft(): FormFields {
+  try {
+    const raw = localStorage.getItem(FORM_DRAFT_KEY);
+    if (!raw) return EMPTY_FORM;
+    const parsed = JSON.parse(raw) as Partial<FormFields>;
+    return { ...EMPTY_FORM, ...parsed };
+  } catch {
+    return EMPTY_FORM;
+  }
+}
+
 function compileForm(f: FormFields): string {
   const parts: string[] = [];
 
@@ -223,12 +240,39 @@ function VaultBadge({ status }: { status: VaultStatus | null }) {
 
 // ── FormView ──────────────────────────────────────────────────────────────────
 
+/// Mescla os campos extraídos do ticket com o formulário atual: valor extraído
+/// só entra onde há conteúdo; o que o usuário já digitou é preservado. Selects
+/// (`atualizacao`/`solucaoTipo`) são validados contra os valores permitidos.
+function mergeExtractedFields(current: FormFields, extracted: Partial<FormFields>): FormFields {
+  const pick = (k: keyof FormFields) => {
+    const v = (extracted[k] ?? "").trim();
+    return v || current[k];
+  };
+  const pickEnum = (k: keyof FormFields, allowed: string[]) => {
+    const v = (extracted[k] ?? "").trim().toLowerCase();
+    return allowed.includes(v) ? v : current[k];
+  };
+  return {
+    correcao: pick("correcao"),
+    caminho: pick("caminho"),
+    parametro: pick("parametro"),
+    release: pick("release"),
+    atualizacao: pickEnum("atualizacao", ["padrao", "executavel", "nenhuma"]),
+    validacao: pick("validacao"),
+    solucaoTipo: pickEnum("solucaoTipo", ["definitiva", "paliativa"]),
+    scripts: pick("scripts"),
+    pendencias: pick("pendencias"),
+    cenario: pick("cenario"),
+  };
+}
+
 function FormView({
   fields,
   onChange,
   onGenerate,
   onGenerateCartilha,
   onGenerateTestes,
+  onRevise,
   disabled,
 }: {
   fields: FormFields;
@@ -236,6 +280,7 @@ function FormView({
   onGenerate: () => void;
   onGenerateCartilha: () => void;
   onGenerateTestes: () => void;
+  onRevise: () => void;
   disabled: boolean;
 }) {
   const set =
@@ -245,9 +290,77 @@ function FormView({
 
   const canGenerate = fields.correcao.trim().length > 0;
 
+  const [showTicket, setShowTicket] = useState(false);
+  const [ticketText, setTicketText] = useState("");
+  const [extracting, setExtracting] = useState(false);
+  const [extractError, setExtractError] = useState<string | null>(null);
+
+  const handleExtract = async () => {
+    if (!ticketText.trim()) return;
+    setExtracting(true);
+    setExtractError(null);
+    try {
+      const extracted = await invoke<Partial<FormFields>>("extract_form_fields", {
+        ticketText,
+      });
+      onChange(mergeExtractedFields(fields, extracted));
+      setShowTicket(false);
+    } catch (e) {
+      setExtractError(String(e));
+    } finally {
+      setExtracting(false);
+    }
+  };
+
   return (
     <>
       <div className="form-body">
+
+        <div className="ticket-extract">
+          {!showTicket ? (
+            <button
+              type="button"
+              className="btn-secondary ticket-extract-toggle"
+              onClick={() => setShowTicket(true)}
+              disabled={disabled}
+              title="Cole o texto do ticket e a IA preenche os campos abaixo"
+            >
+              ⚡ Preencher a partir do ticket
+            </button>
+          ) : (
+            <div className="ticket-extract-box">
+              <div className="form-field">
+                <label>Texto do ticket</label>
+                <textarea
+                  rows={5}
+                  value={ticketText}
+                  onChange={(e) => setTicketText(e.target.value)}
+                  placeholder="Cole aqui a conversa, descrição ou anotações do ticket. A IA extrai e preenche os campos do formulário (o que você já digitou é preservado)."
+                  disabled={disabled || extracting}
+                  autoFocus
+                />
+              </div>
+              <div className="row">
+                <button
+                  type="button"
+                  className="btn-secondary"
+                  onClick={() => setShowTicket(false)}
+                  disabled={extracting}
+                >
+                  Fechar
+                </button>
+                <button
+                  type="button"
+                  onClick={handleExtract}
+                  disabled={disabled || extracting || !ticketText.trim()}
+                >
+                  {extracting ? "Extraindo..." : "Extrair campos"}
+                </button>
+              </div>
+              {extractError && <p className="key-error">{extractError}</p>}
+            </div>
+          )}
+        </div>
 
         <div className="form-field">
           <label>
@@ -383,6 +496,15 @@ function FormView({
           disabled={disabled}
         >
           Limpar
+        </button>
+        <button
+          type="button"
+          className="btn-secondary"
+          onClick={onRevise}
+          disabled={disabled}
+          title="Cole uma devolutiva escrita à mão e a IA revisa aplicando o vault (sem reescrever)"
+        >
+          Revisar
         </button>
         <div className="form-footer-right">
           <button
@@ -584,6 +706,16 @@ function SettingsPanel({
   const [autostartBusy, setAutostartBusy] = useState(false);
   const [autostartError, setAutostartError] = useState<string | null>(null);
 
+  const [hotkey, setHotkey] = useState<string | null>(null);
+  const [hotkeyCapturing, setHotkeyCapturing] = useState(false);
+  const [hotkeyBusy, setHotkeyBusy] = useState(false);
+  const [hotkeyError, setHotkeyError] = useState<string | null>(null);
+  const [hotkeyMessage, setHotkeyMessage] = useState<string | null>(null);
+
+  const [gitBackup, setGitBackup] = useState<boolean | null>(null);
+  const [gitBackupBusy, setGitBackupBusy] = useState(false);
+  const [gitBackupError, setGitBackupError] = useState<string | null>(null);
+
   const [updateChecking, setUpdateChecking] = useState(false);
   const [updateInfo, setUpdateInfo] = useState<UpdateInfo | null>(null);
   const [updateError, setUpdateError] = useState<string | null>(null);
@@ -601,6 +733,70 @@ function SettingsPanel({
         setAutostartError(`Não foi possível ler o estado de autostart: ${String(e)}`);
       });
   }, []);
+
+  useEffect(() => {
+    invoke<string>("get_hotkey")
+      .then(setHotkey)
+      .catch(() => setHotkey("Ctrl+Shift+KeyD"));
+    invoke<boolean>("get_vault_git_backup")
+      .then(setGitBackup)
+      .catch(() => setGitBackup(false));
+  }, []);
+
+  const handleToggleGitBackup = async () => {
+    if (gitBackup === null || gitBackupBusy) return;
+    const next = !gitBackup;
+    setGitBackupBusy(true);
+    setGitBackupError(null);
+    try {
+      await invoke("set_vault_git_backup", { enabled: next });
+      setGitBackup(next);
+    } catch (e) {
+      setGitBackupError(String(e));
+    } finally {
+      setGitBackupBusy(false);
+    }
+  };
+
+  // "Ctrl+Shift+KeyD" → "Ctrl+Shift+D" para exibição
+  const prettyHotkey = (h: string) =>
+    h
+      .split("+")
+      .map((t) => t.replace(/^Key/, "").replace(/^Digit/, ""))
+      .join("+");
+
+  const handleHotkeyKeyDown = async (e: React.KeyboardEvent<HTMLInputElement>) => {
+    e.preventDefault();
+    if (hotkeyBusy) return;
+    // Ignora enquanto só há modificadores pressionados
+    if (/^(Control|Shift|Alt|Meta)/.test(e.code)) return;
+
+    const mods: string[] = [];
+    if (e.ctrlKey) mods.push("Ctrl");
+    if (e.altKey) mods.push("Alt");
+    if (e.shiftKey) mods.push("Shift");
+    if (e.metaKey) mods.push("Super");
+    if (mods.length === 0) {
+      setHotkeyError("Use ao menos um modificador (Ctrl, Alt ou Shift).");
+      return;
+    }
+
+    const combo = [...mods, e.code].join("+");
+    setHotkeyBusy(true);
+    setHotkeyError(null);
+    setHotkeyMessage(null);
+    try {
+      await invoke("set_hotkey", { hotkey: combo });
+      setHotkey(combo);
+      setHotkeyMessage(`Atalho atualizado: ${prettyHotkey(combo)}`);
+      setHotkeyCapturing(false);
+      (e.target as HTMLInputElement).blur();
+    } catch (err) {
+      setHotkeyError(String(err));
+    } finally {
+      setHotkeyBusy(false);
+    }
+  };
 
   const handleToggleAutostart = async () => {
     if (autostart === null || autostartBusy) return;
@@ -795,6 +991,24 @@ function SettingsPanel({
               : "vazio"}
           </div>
         )}
+
+        <label className="toggle-row" style={{ marginTop: 10 }}>
+          <span>
+            <span className="label">Backup automático do vault (git)</span>
+            <p className="help" style={{ marginTop: 2 }}>
+              Faz um commit git no vault a cada escrita do Artemis (aprovações,
+              cartilhas, aprendizado), dando histórico completo dos .md. Requer git
+              instalado.
+            </p>
+          </span>
+          <input
+            type="checkbox"
+            checked={gitBackup ?? false}
+            onChange={handleToggleGitBackup}
+            disabled={gitBackup === null || gitBackupBusy}
+          />
+        </label>
+        {gitBackupError && <p className="key-error">{gitBackupError}</p>}
       </section>
 
       <hr className="divider" />
@@ -817,10 +1031,37 @@ function SettingsPanel({
         </label>
         {autostartError && <p className="key-error">{autostartError}</p>}
 
-        <p className="help" style={{ marginTop: 8 }}>
-          <strong>Hotkey global:</strong> <code>Ctrl+Shift+D</code> abre o chat de
-          qualquer lugar do Windows. Atalho fixo nesta versão.
-        </p>
+        <div style={{ marginTop: 10 }}>
+          <label>
+            <span className="label">Atalho global para abrir o chat</span>
+          </label>
+          <input
+            type="text"
+            readOnly
+            className={`hotkey-input ${hotkeyCapturing ? "capturing" : ""}`}
+            value={
+              hotkeyCapturing
+                ? "Pressione a combinação..."
+                : hotkey
+                  ? prettyHotkey(hotkey)
+                  : "..."
+            }
+            onFocus={() => {
+              setHotkeyCapturing(true);
+              setHotkeyMessage(null);
+            }}
+            onBlur={() => setHotkeyCapturing(false)}
+            onKeyDown={handleHotkeyKeyDown}
+            disabled={hotkeyBusy}
+            title="Clique e pressione a nova combinação (ex: Ctrl+Alt+A)"
+          />
+          <p className="help" style={{ marginTop: 4 }}>
+            Clique no campo e pressione a combinação desejada (precisa de ao menos um
+            modificador). Aplicada na hora, sem reiniciar.
+          </p>
+          {hotkeyError && <p className="key-error">{hotkeyError}</p>}
+          {hotkeyMessage && <p className="vault-message">{hotkeyMessage}</p>}
+        </div>
       </section>
 
       <hr className="divider" />
@@ -894,7 +1135,7 @@ function SettingsPanel({
 //    e propõe atualizações ao campos-padrao.md via checkbox.
 // Princípio comum: o app PROPÕE, o usuário ACEITA — autonomia preservada.
 
-type LearningTab = "evitar" | "estilo" | "campos" | "frases";
+type LearningTab = "evitar" | "estilo" | "campos" | "frases" | "stats";
 
 function LearningPanel({
   vaultPath,
@@ -943,12 +1184,141 @@ function LearningPanel({
         >
           frases-modelo
         </button>
+        <button
+          type="button"
+          className={`tab ${tab === "stats" ? "active" : ""}`}
+          onClick={() => setTab("stats")}
+        >
+          estatísticas
+        </button>
       </div>
 
       {tab === "evitar" && <EvitarTab vaultPath={vaultPath} />}
       {tab === "estilo" && <EstiloTab vaultPath={vaultPath} />}
       {tab === "campos" && <CamposTab vaultPath={vaultPath} />}
       {tab === "frases" && <FrasesTab vaultPath={vaultPath} />}
+      {tab === "stats" && <StatsTab />}
+    </div>
+  );
+}
+
+// ── StatsTab (#dashboard) ─────────────────────────────────────────────────────
+// Mede a meta do projeto ("edições manuais tendendo a zero"): taxa de edição
+// por semana ISO + volume por categoria. Sem IA — agregação do SQLite.
+
+interface WeekStat {
+  week: string;
+  total: number;
+  edited: number;
+}
+
+interface CategoryStat {
+  category: string;
+  total: number;
+  edited: number;
+}
+
+interface LearningStats {
+  total: number;
+  approved: number;
+  discarded: number;
+  edited_approved: number;
+  weeks: WeekStat[];
+  categories: CategoryStat[];
+}
+
+function StatsTab() {
+  const [stats, setStats] = useState<LearningStats | null>(null);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    invoke<LearningStats>("learning_stats")
+      .then(setStats)
+      .catch((e) => setError(String(e)));
+  }, []);
+
+  if (error) return <p className="key-error">{error}</p>;
+  if (!stats) return <p className="help">Carregando...</p>;
+
+  const editRate =
+    stats.approved > 0 ? Math.round((stats.edited_approved / stats.approved) * 100) : 0;
+  const maxWeekTotal = Math.max(1, ...stats.weeks.map((w) => w.total));
+  const maxCatTotal = Math.max(1, ...stats.categories.map((c) => c.total));
+
+  return (
+    <div className="stats-tab">
+      <div className="stats-cards">
+        <div className="stats-card">
+          <strong>{stats.approved}</strong>
+          <span>aprovadas</span>
+        </div>
+        <div className="stats-card">
+          <strong>{stats.discarded}</strong>
+          <span>descartadas</span>
+        </div>
+        <div className="stats-card">
+          <strong>{editRate}%</strong>
+          <span>taxa de edição</span>
+        </div>
+      </div>
+
+      <h3 className="stats-section-title">Taxa de edição por semana</h3>
+      <p className="help">
+        Barra cheia = aprovadas na semana; parte âmbar = quantas você precisou editar.
+        A meta é a parte âmbar sumir com o tempo.
+      </p>
+      {stats.weeks.length === 0 ? (
+        <p className="help">Sem devolutivas aprovadas ainda.</p>
+      ) : (
+        <div className="stats-bars">
+          {stats.weeks.map((w) => (
+            <div key={w.week} className="stats-bar-row">
+              <span className="stats-bar-label">{w.week.replace("-W", " · sem ")}</span>
+              <div className="stats-bar-track">
+                <div
+                  className="stats-bar-fill"
+                  style={{ width: `${(w.total / maxWeekTotal) * 100}%` }}
+                >
+                  <div
+                    className="stats-bar-edited"
+                    style={{ width: w.total > 0 ? `${(w.edited / w.total) * 100}%` : "0%" }}
+                  />
+                </div>
+              </div>
+              <span className="stats-bar-value">
+                {w.edited}/{w.total}
+              </span>
+            </div>
+          ))}
+        </div>
+      )}
+
+      <h3 className="stats-section-title">Aprovadas por categoria</h3>
+      {stats.categories.length === 0 ? (
+        <p className="help">Sem categorias ainda.</p>
+      ) : (
+        <div className="stats-bars">
+          {stats.categories.map((c) => (
+            <div key={c.category} className="stats-bar-row">
+              <span className="stats-bar-label">{c.category}</span>
+              <div className="stats-bar-track">
+                <div
+                  className="stats-bar-fill"
+                  style={{ width: `${(c.total / maxCatTotal) * 100}%` }}
+                >
+                  <div
+                    className="stats-bar-edited"
+                    style={{ width: c.total > 0 ? `${(c.edited / c.total) * 100}%` : "0%" }}
+                  />
+                </div>
+              </div>
+              <span className="stats-bar-value">
+                {c.edited}/{c.total}
+              </span>
+            </div>
+          ))}
+        </div>
+      )}
     </div>
   );
 }
@@ -1823,6 +2193,24 @@ function CartilhaView({
     }
   };
 
+  const [exportingPdf, setExportingPdf] = useState(false);
+
+  const handleExportPdf = async () => {
+    if (!savedPath) return;
+    setExportingPdf(true);
+    setError(null);
+    try {
+      const pdfPath = await invoke<string>("export_cartilha_pdf", {
+        indexHtmlPath: savedPath,
+      });
+      await invoke("open_in_system", { path: pdfPath });
+    } catch (e) {
+      setError(`Erro ao exportar PDF: ${String(e)}`);
+    } finally {
+      setExportingPdf(false);
+    }
+  };
+
   const handlePreview = async () => {
     if (!editedContent.trim()) return;
     setPreviewing(true);
@@ -1858,6 +2246,15 @@ function CartilhaView({
           <div className="row">
             <button type="button" className="btn-secondary" onClick={onCancel}>
               Nova devolutiva
+            </button>
+            <button
+              type="button"
+              className="btn-secondary"
+              onClick={handleExportPdf}
+              disabled={exportingPdf}
+              title="Gera cartilha.pdf na pasta da cartilha (via Edge) e abre"
+            >
+              {exportingPdf ? "Gerando PDF..." : "Exportar PDF"}
             </button>
             <button type="button" onClick={handleOpen}>
               Abrir no navegador
@@ -2311,6 +2708,221 @@ function TestesView({
   );
 }
 
+// ── RevisaoView ───────────────────────────────────────────────────────────────
+// Modo revisão: o inverso da geração — o dev cola uma devolutiva escrita à mão
+// e a IA só aplica estilo.md/evitar.md/campos-padrao.md, sem reescrever.
+// O resultado cai no ResultView normal (aprovar/descartar/copiar iguais).
+
+function RevisaoView({
+  onRevise,
+  onCancel,
+  disabled,
+}: {
+  onRevise: (text: string) => void;
+  onCancel: () => void;
+  disabled: boolean;
+}) {
+  const [text, setText] = useState("");
+
+  return (
+    <div className="revisao-view">
+      <header className="cartilha-header">
+        <h2>Revisar devolutiva</h2>
+        <button className="secondary close" onClick={onCancel} aria-label="Voltar">
+          ✕
+        </button>
+      </header>
+      <p className="help">
+        Cole uma devolutiva escrita à mão. A IA revisa aplicando o seu{" "}
+        <code>estilo.md</code>, o <code>evitar.md</code> e os valores do{" "}
+        <code>campos-padrao.md</code> — sem reescrever do zero nem mudar a estrutura.
+      </p>
+      <div className="form-field revisao-text">
+        <textarea
+          value={text}
+          onChange={(e) => setText(e.target.value)}
+          placeholder="Cole aqui a devolutiva que você escreveu..."
+          disabled={disabled}
+          autoFocus
+          rows={14}
+        />
+      </div>
+      <div className="row revisao-actions">
+        <button type="button" className="btn-secondary" onClick={onCancel} disabled={disabled}>
+          Cancelar
+        </button>
+        <button type="button" onClick={() => onRevise(text)} disabled={disabled || !text.trim()}>
+          Revisar
+        </button>
+      </div>
+    </div>
+  );
+}
+
+// ── HistoryPanel ──────────────────────────────────────────────────────────────
+// Busca e revisão do histórico SQLite (lista recente + busca FTS5). Somente
+// leitura + copiar/excluir — o vault continua sendo a fonte de verdade do
+// aprendizado; aqui é consulta.
+
+interface HistoryEntry {
+  id: number;
+  raw_input: string;
+  ai_raw_output: string;
+  final_output: string;
+  approved: boolean;
+  edited: boolean;
+  model: string;
+  created_at: number;
+  category: string | null;
+}
+
+function formatEntryDate(epochSecs: number): string {
+  return new Date(epochSecs * 1000).toLocaleString("pt-BR", {
+    day: "2-digit",
+    month: "2-digit",
+    year: "numeric",
+    hour: "2-digit",
+    minute: "2-digit",
+  });
+}
+
+function HistoryPanel({ onClose }: { onClose: () => void }) {
+  const [query, setQuery] = useState("");
+  const [approvedOnly, setApprovedOnly] = useState(false);
+  const [entries, setEntries] = useState<HistoryEntry[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+  const [expandedId, setExpandedId] = useState<number | null>(null);
+  const [copiedId, setCopiedId] = useState<number | null>(null);
+  const [deleteArmedId, setDeleteArmedId] = useState<number | null>(null);
+
+  const load = useCallback(async (q: string, approved: boolean) => {
+    setLoading(true);
+    setError(null);
+    try {
+      const result = q.trim()
+        ? await invoke<HistoryEntry[]>("search_history", { query: q.trim(), limit: 50 })
+        : await invoke<HistoryEntry[]>("list_history", { limit: 50, approvedOnly: approved });
+      // FTS5 não filtra por approved; aplica no cliente quando buscando
+      setEntries(q.trim() && approved ? result.filter((e) => e.approved) : result);
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setLoading(false);
+    }
+  }, []);
+
+  // Carga inicial + busca com debounce
+  useEffect(() => {
+    const t = setTimeout(() => load(query, approvedOnly), 250);
+    return () => clearTimeout(t);
+  }, [query, approvedOnly, load]);
+
+  const handleCopy = async (entry: HistoryEntry) => {
+    await navigator.clipboard.writeText(entry.final_output);
+    setCopiedId(entry.id);
+    setTimeout(() => setCopiedId((cur) => (cur === entry.id ? null : cur)), 1500);
+  };
+
+  // Exclusão em 2 cliques (arma no primeiro, confirma no segundo)
+  const handleDelete = async (id: number) => {
+    if (deleteArmedId !== id) {
+      setDeleteArmedId(id);
+      return;
+    }
+    setDeleteArmedId(null);
+    try {
+      await invoke("delete_history_entry", { id });
+      setEntries((cur) => cur.filter((e) => e.id !== id));
+    } catch (e) {
+      setError(String(e));
+    }
+  };
+
+  return (
+    <div className="settings-panel">
+      <header className="settings-header">
+        <h2>Histórico</h2>
+        <button className="secondary close" onClick={onClose} aria-label="Voltar">
+          ✕
+        </button>
+      </header>
+
+      <div className="history-toolbar">
+        <input
+          type="text"
+          value={query}
+          onChange={(e) => setQuery(e.target.value)}
+          placeholder="Buscar no histórico..."
+          autoFocus
+        />
+        <label className="history-filter">
+          <input
+            type="checkbox"
+            checked={approvedOnly}
+            onChange={(e) => setApprovedOnly(e.target.checked)}
+          />
+          só aprovadas
+        </label>
+      </div>
+
+      {error && <p className="key-error">{error}</p>}
+
+      {loading ? (
+        <p className="help">Carregando...</p>
+      ) : (
+        <div className="history-list">
+          {entries.length === 0 && <p className="help">Nenhuma entrada encontrada.</p>}
+          {entries.map((entry) => (
+            <div key={entry.id} className="history-card">
+              <button
+                type="button"
+                className="history-card-head"
+                onClick={() => {
+                  setExpandedId(expandedId === entry.id ? null : entry.id);
+                  setDeleteArmedId(null);
+                }}
+              >
+                <span className="history-date">{formatEntryDate(entry.created_at)}</span>
+                {entry.category && <span className="history-chip">{entry.category}</span>}
+                <span className={`history-chip ${entry.approved ? "ok" : "off"}`}>
+                  {entry.approved ? "aprovada" : "descartada"}
+                </span>
+                {entry.edited && <span className="history-chip warn">editada</span>}
+              </button>
+              <p className="history-preview">
+                {entry.final_output.slice(0, 140)}
+                {entry.final_output.length > 140 ? "…" : ""}
+              </p>
+              {expandedId === entry.id && (
+                <div className="history-detail">
+                  <pre>{entry.final_output}</pre>
+                  <details>
+                    <summary>Input original do formulário</summary>
+                    <pre>{entry.raw_input}</pre>
+                  </details>
+                  <div className="row">
+                    <button
+                      type="button"
+                      className="btn-danger"
+                      onClick={() => handleDelete(entry.id)}
+                    >
+                      {deleteArmedId === entry.id ? "Confirmar exclusão" : "Excluir"}
+                    </button>
+                    <button type="button" onClick={() => handleCopy(entry)}>
+                      {copiedId === entry.id ? "Copiado ✓" : "Copiar devolutiva"}
+                    </button>
+                  </div>
+                </div>
+              )}
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
 // ── ChatWindow (main) ─────────────────────────────────────────────────────────
 
 export default function ChatWindow() {
@@ -2318,10 +2930,27 @@ export default function ChatWindow() {
   const [keyLoaded, setKeyLoaded] = useState(false);
   const [showSettings, setShowSettings] = useState(false);
   const [showLearning, setShowLearning] = useState(false);
+  const [showHistory, setShowHistory] = useState(false);
   const [vaultStatus, setVaultStatus] = useState<VaultStatus | null>(null);
 
-  const [view, setView] = useState<"form" | "result" | "cartilha" | "testes">("form");
-  const [form, setForm] = useState<FormFields>(EMPTY_FORM);
+  const [view, setView] = useState<"form" | "result" | "cartilha" | "testes" | "revisao">("form");
+  // Quando o resultado veio do modo revisão, guarda o texto colado — aprovar/
+  // descartar usam ele como raw_input em vez do compileForm(form)
+  const [revisionSource, setRevisionSource] = useState<string | null>(null);
+  const [form, setForm] = useState<FormFields>(loadFormDraft);
+
+  // Auto-salva o rascunho do formulário (debounce). Aprovar/descartar/limpar
+  // seta EMPTY_FORM, que é persistido também — ou seja, limpa o rascunho.
+  useEffect(() => {
+    const t = setTimeout(() => {
+      try {
+        localStorage.setItem(FORM_DRAFT_KEY, JSON.stringify(form));
+      } catch {
+        // quota cheia ou storage indisponível — rascunho é best-effort
+      }
+    }, 400);
+    return () => clearTimeout(t);
+  }, [form]);
   const [result, setResult] = useState("");
   const [streaming, setStreaming] = useState(false);
   const [currentCategory, setCurrentCategory] = useState<CategoryEvent | null>(null);
@@ -2380,6 +3009,7 @@ export default function ChatWindow() {
     streamingRef.current = "";
     setResult("");
     setCurrentCategory(null);
+    setRevisionSource(null);
     setStreaming(true);
     setView("result");
 
@@ -2393,10 +3023,35 @@ export default function ChatWindow() {
     }
   }, [form, streaming]);
 
+  const handleRevise = useCallback(
+    async (text: string) => {
+      if (streaming || sendingRef.current || !text.trim()) return;
+
+      sendingRef.current = true;
+      streamingRef.current = "";
+      setResult("");
+      setCurrentCategory(null);
+      setRevisionSource(text);
+      setStreaming(true);
+      setView("result");
+
+      try {
+        await invoke("stream_revision", { userText: text });
+      } catch (e) {
+        setResult(`Erro: ${String(e)}`);
+        setStreaming(false);
+      } finally {
+        sendingRef.current = false;
+      }
+    },
+    [streaming],
+  );
+
   const resetToForm = useCallback((clearForm: boolean) => {
     setView("form");
     setResult("");
     setCurrentCategory(null);
+    setRevisionSource(null);
     streamingRef.current = "";
     if (clearForm) setForm(EMPTY_FORM);
   }, []);
@@ -2408,28 +3063,29 @@ export default function ChatWindow() {
 
   const handleApprove = useCallback(
     async (finalText: string) => {
-      const rawInput = compileForm(form);
+      const rawInput = revisionSource ?? compileForm(form);
       const out = await invoke<{ id: number; category: string; examples_file: string | null }>(
         "approve_entry",
         { rawInput, aiRawOutput: result, finalOutput: finalText },
       );
       console.info(`[approve] #${out.id} categoria=${out.category} arquivo=${out.examples_file}`);
-      resetToForm(true);
+      // Aprovação de revisão não limpa o formulário (a revisão não veio dele)
+      resetToForm(revisionSource === null);
     },
-    [form, result, resetToForm],
+    [form, result, revisionSource, resetToForm],
   );
 
   const handleDiscard = useCallback(
     async (finalText: string) => {
-      const rawInput = compileForm(form);
+      const rawInput = revisionSource ?? compileForm(form);
       await invoke<number>("discard_entry", {
         rawInput,
         aiRawOutput: result,
         finalOutput: finalText,
       });
-      resetToForm(true);
+      resetToForm(revisionSource === null);
     },
-    [form, result, resetToForm],
+    [form, result, revisionSource, resetToForm],
   );
 
   const saveApiKey = async (key: string) => {
@@ -2462,6 +3118,10 @@ export default function ChatWindow() {
     );
   }
 
+  if (showHistory) {
+    return <HistoryPanel onClose={() => setShowHistory(false)} />;
+  }
+
   return (
     <div className="chat-window">
       <header className="chat-header">
@@ -2473,6 +3133,18 @@ export default function ChatWindow() {
           <button
             onClick={() => {
               setShowSettings(false);
+              setShowLearning(false);
+              setShowHistory(true);
+            }}
+            title="Histórico: buscar e revisar devolutivas anteriores"
+            aria-label="Histórico"
+          >
+            🕘
+          </button>
+          <button
+            onClick={() => {
+              setShowSettings(false);
+              setShowHistory(false);
               setShowLearning(true);
             }}
             title="Aprendizado: analisar edições e sugerir adições ao evitar.md"
@@ -2507,6 +3179,14 @@ export default function ChatWindow() {
           onGenerate={handleGenerate}
           onGenerateCartilha={() => setView("cartilha")}
           onGenerateTestes={() => setView("testes")}
+          onRevise={() => setView("revisao")}
+          disabled={streaming}
+        />
+      )}
+      {view === "revisao" && (
+        <RevisaoView
+          onRevise={handleRevise}
+          onCancel={() => setView("form")}
           disabled={streaming}
         />
       )}

@@ -29,6 +29,40 @@ Campos disponíveis (inclua apenas os aplicáveis, nesta ordem):
 10. Pendências ou observações
 11. Cenário não simulado (passo a passo dos testes realizados)"#;
 
+/// Messages do modo REVISÃO: aplica as regras do vault (estilo/evitar/campos)
+/// a uma devolutiva que o usuário escreveu à mão, sem reescrever do zero.
+/// Não usa o TEMPLATE_HEADER da geração — o objetivo é preservar o texto,
+/// não re-estruturá-lo no template.
+pub fn build_revision_messages(vault: &VaultContext, user_text: &str) -> Vec<ChatMessage> {
+    let system = format!(
+        "Você REVISA devolutivas técnicas escritas manualmente por um dev para o time de suporte N1. \
+        Português brasileiro, prosa técnica direta.\n\n\
+        REGRAS DE REVISÃO:\n\
+        - NÃO reescreva do zero: preserve a estrutura, a ordem e o conteúdo do texto original.\n\
+        - Corrija apenas: expressões da lista de EVITAR, desvios do ESTILO do usuário, erros de gramática/pontuação e valores desatualizados conforme VALORES FREQUENTES (ex: release antiga).\n\
+        - Mantenha as tags [n]...[/n] se o texto já as usar; NÃO as adicione se não existirem.\n\
+        - NÃO adicione informações novas nem remova informações existentes.\n\
+        - NÃO use markdown.\n\
+        - Devolva APENAS o texto revisado, sem comentários sobre o que mudou e sem despedidas.\n\n\
+        ═══ ESTILO DO USUÁRIO ═══\n\n{estilo}\n\n\
+        ═══ EXPRESSÕES A EVITAR ═══\n\n{evitar}\n\n\
+        ═══ VALORES FREQUENTES ═══\n\n{campos}",
+        estilo = vault.estilo.trim(),
+        evitar = vault.evitar.trim(),
+        campos = vault.campos_padrao.trim(),
+    );
+    vec![
+        ChatMessage {
+            role: "system".to_string(),
+            content: system,
+        },
+        ChatMessage {
+            role: "user".to_string(),
+            content: user_text.to_string(),
+        },
+    ]
+}
+
 pub struct PromptBuilder<'a> {
     vault: &'a VaultContext,
     category: Option<&'a str>,

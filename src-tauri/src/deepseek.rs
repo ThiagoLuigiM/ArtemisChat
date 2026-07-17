@@ -335,6 +335,8 @@ pub fn build_cartilha_messages(
         Comece o conteúdo da caixa com um rótulo curto seguido de dois-pontos (vira negrito no HTML).{images_hint}\n\n\
         REGRAS:\n\
         - NÃO use markdown (`#`, `**`, `*`). Exceção: linhas iniciadas com `- ` viram bullets no HTML final — use-as para enumerações e checklists.\n\
+        - Passo a passo: escreva linhas numeradas `1.`, `2.`, `3.` num mesmo bloco (sem linha em branco entre elas) — viram passos com círculos numerados no HTML.\n\
+        - Dados tabulares (parâmetros, campos, status): use linhas com colunas separadas por `|` num mesmo bloco; a primeira linha é o cabeçalho. Ex: `Campo | Obrigatório | Descrição`.\n\
         - NÃO use as tags `[n]...[/n]` (essas são da devolutiva N1, formato diferente).\n\
         - Frases curtas, voz ativa, tom direto mas amigável.\n\
         - Se o input mencionar nova permissão/parâmetro/caminho, dedique uma seção a explicar passo a passo onde encontrar.\n\
@@ -432,6 +434,107 @@ pub async fn suggest_test_scenarios(
         Err(e) => {
             tracing::warn!("falha parseando sugestão de cenários: {} (raw: {:?})", e, raw);
             Ok(TestScenariosSuggestion::default())
+        }
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Preenchimento do formulário a partir do ticket — extrai os campos do FormView
+// de um texto bruto (conversa/descrição do ticket) via IA
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Campos do FormView extraídos de um texto de ticket. Serializa em camelCase
+/// pra casar com a interface `FormFields` do frontend; a IA é instruída a
+/// devolver as mesmas chaves.
+#[derive(serde::Deserialize, serde::Serialize, Clone, Debug, Default)]
+#[serde(rename_all = "camelCase", default)]
+pub struct FormFieldsSuggestion {
+    pub correcao: String,
+    pub caminho: String,
+    pub parametro: String,
+    pub release: String,
+    /// "padrao" | "executavel" | "nenhuma" | "" (frontend valida)
+    pub atualizacao: String,
+    pub validacao: String,
+    /// "definitiva" | "paliativa" | "" (frontend valida)
+    pub solucao_tipo: String,
+    pub scripts: String,
+    pub pendencias: String,
+    pub cenario: String,
+}
+
+/// Extrai os campos do formulário de devolutiva a partir do texto bruto de um
+/// ticket (conversa, descrição, anotações). Não-streaming; campos sem evidência
+/// no texto voltam como string vazia — a IA é proibida de inventar.
+pub async fn extract_form_fields(
+    api_key: &str,
+    ticket_text: &str,
+) -> anyhow::Result<FormFieldsSuggestion> {
+    if ticket_text.trim().is_empty() {
+        anyhow::bail!("texto do ticket vazio — nada pra extrair");
+    }
+
+    let prompt = format!(
+        "Você extrai campos estruturados do texto bruto de um ticket de suporte/desenvolvimento (conversa, descrição ou anotações do dev) para preencher um formulário de devolutiva técnica. Preencha:\n\n\
+        - `correcao`: o que foi alterado/corrigido (resumo técnico do delta — campo principal).\n\
+        - `caminho`: caminho de menu no sistema, formato `A > B > C`, se citado.\n\
+        - `parametro`: novo parâmetro ou permissão (nome, onde fica, pra que serve), se houver.\n\
+        - `release`: release/versão, formato `vX.Y.Z — dd/mm/aaaa` se ambos citados (senão só o que houver).\n\
+        - `atualizacao`: exatamente `padrao` (atualização sem troca de executável), `executavel` (com troca de executável) ou `nenhuma`; string vazia se o texto não deixar claro.\n\
+        - `validacao`: como o suporte pode reproduzir e validar a correção.\n\
+        - `solucaoTipo`: exatamente `definitiva` ou `paliativa`; string vazia se não estiver claro.\n\
+        - `scripts`: scripts/SQL citados, verbatim.\n\
+        - `pendencias`: ressalvas, pendências ou observações.\n\
+        - `cenario`: cenários não simulados / limitações de teste mencionadas.\n\n\
+        REGRAS:\n\
+        - APENAS JSON puro, sem texto antes ou depois, sem fences markdown.\n\
+        - NÃO invente informação: campo sem evidência no texto devolve string vazia.\n\
+        - Extraia e resuma no campo certo; não copie o ticket inteiro pra dentro de um campo.\n\
+        - Cada campo é uma STRING (use `\\n` para múltiplas linhas).\n\
+        - Português brasileiro, tom técnico direto.\n\n\
+        Estrutura JSON esperada:\n\
+        {{\"correcao\":\"...\",\"caminho\":\"...\",\"parametro\":\"...\",\"release\":\"...\",\"atualizacao\":\"...\",\"validacao\":\"...\",\"solucaoTipo\":\"...\",\"scripts\":\"...\",\"pendencias\":\"...\",\"cenario\":\"...\"}}\n\n\
+        ═══ TEXTO DO TICKET ═══\n\n{ticket}",
+        ticket = ticket_text.trim(),
+    );
+
+    let messages = vec![ChatMessage {
+        role: "user".to_string(),
+        content: prompt,
+    }];
+
+    let body = ClassifyRequest {
+        model: "deepseek-chat",
+        messages: &messages,
+        stream: false,
+        temperature: 0.2,
+        max_tokens: 2048,
+    };
+
+    let client = reqwest::Client::new();
+    let resp = client
+        .post(API_URL)
+        .bearer_auth(api_key)
+        .header("Content-Type", "application/json")
+        .json(&body)
+        .send()
+        .await?
+        .error_for_status()?
+        .json::<ClassifyResponse>()
+        .await?;
+
+    let raw = resp
+        .choices
+        .first()
+        .map(|c| c.message.content.as_str())
+        .unwrap_or("{}");
+
+    let json_slice = extract_json_object(raw).unwrap_or("{}");
+    match serde_json::from_str::<FormFieldsSuggestion>(json_slice) {
+        Ok(s) => Ok(s),
+        Err(e) => {
+            tracing::warn!("falha parseando campos do ticket: {} (raw: {:?})", e, raw);
+            Ok(FormFieldsSuggestion::default())
         }
     }
 }
